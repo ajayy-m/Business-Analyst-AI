@@ -1,0 +1,26 @@
+﻿# Environments
+venv/
+env/
+.venv/
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Project-generated data (uploaded files + DuckDB databases + catalog)
+backend/data/
+backend/uploads/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
