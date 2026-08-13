@@ -4,7 +4,7 @@ manual /query endpoint and the LLM-driven /ask endpoint, so there's only
 one place that decides what SQL is allowed to run.
 """
 import numpy as np
-from app import catalog
+from app.data import catalog
 
 FORBIDDEN_KEYWORDS = [
     "insert", "update", "delete", "drop", "alter",

@@ -4,7 +4,7 @@ DuckDB table plus catalog metadata.
 """
 import re
 import pandas as pd
-from app import catalog
+from app.data import catalog
 
 
 DATE_KEYWORDS = {"date", "created", "updated", "timestamp", "time"}

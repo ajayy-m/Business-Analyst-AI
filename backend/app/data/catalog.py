@@ -8,7 +8,7 @@ import os
 import duckdb
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 CATALOG_FILE = DATA_DIR / "catalog.json"
 
@@ -56,6 +56,16 @@ def get_table_info(dataset_id: str, table_name: str) -> dict | None:
     if not ds:
         return None
     return ds["tables"].get(table_name)
+
+
+def get_column_names(dataset_id: str, table_name: str) -> list[str]:
+    """Used to validate LLM-supplied column names before building SQL by
+    string formatting (as detect_anomalies does) -- prevents injection
+    since these values aren't going through parameterized queries."""
+    info = get_table_info(dataset_id, table_name)
+    if not info:
+        return []
+    return [c["name"] for c in info["columns"]]
 
 
 def catalog_as_llm_context(dataset_id: str) -> str:

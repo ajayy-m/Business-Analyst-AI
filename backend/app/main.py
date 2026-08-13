@@ -9,7 +9,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import groq
 
-from app import ingestion, catalog, sql_safety, agent, diagnostics
+from app.data import ingestion, catalog
+from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard
+from app import agent, visualization
 
 app = FastAPI(title="AI Business Analyst API", version="0.1.0-phase1")
 
@@ -183,11 +185,21 @@ def ask_question(dataset_id: str, question: str = Form(...)):
 
             answer = agent.synthesize_diagnostic_answer(question, findings)
 
+            charts = {
+                "trend": visualization.build_trend_chart(
+                    findings["overall"]["period_series"], params["metric_column"]
+                ),
+                "driver_breakdown": visualization.build_driver_bar_chart(
+                    findings["level1_driver"], findings["level2_driver"], params["metric_column"]
+                ),
+            }
+
             return {
                 "question": question,
                 "intent": "diagnostic",
                 "findings": findings,
                 "answer": answer,
+                "charts": charts,
             }
 
         # lookup path -- same as /ask/simple
@@ -207,6 +219,8 @@ def ask_question(dataset_id: str, question: str = Form(...)):
 
         answer = agent.synthesize_answer(question, sql, result["columns"], result["rows"])
 
+        chart = visualization.build_chart_from_query_result(result["columns"], result["rows"])
+
         return {
             "question": question,
             "intent": "lookup",
@@ -214,6 +228,7 @@ def ask_question(dataset_id: str, question: str = Form(...)):
             "columns": result["columns"],
             "rows": result["rows"][:50],
             "answer": answer,
+            "chart": chart,
         }
 
     except groq.AuthenticationError:
@@ -233,3 +248,56 @@ def ask_question(dataset_id: str, question: str = Form(...)):
         raise HTTPException(
             503, "Couldn't reach the Groq API -- check your internet connection."
         )
+
+
+@app.post("/datasets/{dataset_id}/forecast")
+def forecast(
+    dataset_id: str,
+    metric_column: str = Form(...),
+    date_column: str = Form(...),
+    periods_ahead: int = Form(3),
+    granularity: str = Form("month"),
+):
+    """
+    Projects a metric forward using a linear trend fit to historical
+    periods, with a 95% confidence band from the residual spread.
+    Purely statistical -- no LLM involved. Low r_squared in the response
+    means the trend explains little of the variance; treat the forecast
+    with proportional skepticism in that case.
+    """
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    try:
+        result = forecasting.forecast_metric(
+            dataset_id=dataset_id,
+            metric_column=metric_column,
+            date_column=date_column,
+            periods_ahead=periods_ahead,
+            granularity=granularity,
+        )
+    except forecasting.ForecastError as e:
+        raise HTTPException(400, str(e))
+
+    result["chart"] = visualization.build_forecast_chart(
+        result["history"], result["forecast"], metric_column
+    )
+    return result
+
+
+@app.get("/datasets/{dataset_id}/anomalies")
+def get_anomalies(dataset_id: str, z_threshold: float = 1.5):
+    """
+    Proactive dashboard scan: checks every metric x category combination
+    for a statistically unusual latest-period deviation, without the user
+    asking a specific question. Complements (doesn't replace) the deeper
+    2-level drill-down in /ask -- this is breadth-first across the whole
+    schema, the diagnostic path is depth-first on one question.
+    """
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    flags = anomaly_dashboard.scan_for_anomalies(dataset_id, z_threshold=z_threshold)
+    return {"flags": flags, "count": len(flags)}

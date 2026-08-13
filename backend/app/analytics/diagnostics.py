@@ -11,7 +11,8 @@ Deliberately NOT an LLM call: contribution math and anomaly z-scores are
 computed here in Python/SQL. The agent's synthesis step only narrates
 these pre-computed findings -- it never does the arithmetic itself.
 """
-from app import catalog
+from app.data import catalog
+from app.analytics import multi_table
 
 
 class DiagnosticError(Exception):
@@ -25,22 +26,22 @@ def _build_where(filters: dict):
     return "WHERE " + " AND ".join(clauses), list(filters.values())
 
 
-def _validate_columns(table_info: dict, metric_column: str, date_column: str, filters: dict):
-    col_names = {c["name"]: c for c in table_info["columns"]}
+def _validate_columns(available_columns: list, metric_column: str, date_column: str, filters: dict):
+    col_names = {c["name"]: c for c in available_columns}
 
     if metric_column not in col_names:
-        raise DiagnosticError(f"'{metric_column}' is not a column in this table.")
+        raise DiagnosticError(f"'{metric_column}' is not a column in this dataset.")
     if col_names[metric_column]["inferred_role"] != "metric":
         raise DiagnosticError(f"'{metric_column}' is not a numeric metric column.")
 
     if date_column not in col_names:
-        raise DiagnosticError(f"'{date_column}' is not a column in this table.")
+        raise DiagnosticError(f"'{date_column}' is not a column in this dataset.")
     if col_names[date_column]["inferred_role"] != "date":
         raise DiagnosticError(f"'{date_column}' is not a date column.")
 
     for f in filters:
         if f not in col_names:
-            raise DiagnosticError(f"Filter column '{f}' is not a column in this table.")
+            raise DiagnosticError(f"Filter column '{f}' is not a column in this dataset.")
 
     return col_names
 
@@ -119,23 +120,24 @@ def _check_anomaly(con, table_name, metric_column, date_column, filters):
 
 
 def run_diagnostic(dataset_id: str, metric_column: str, date_column: str,
-                    filters: dict | None = None, table_name: str | None = None) -> dict:
+                    filters: dict | None = None) -> dict:
     filters = filters or {}
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
         raise DiagnosticError("Dataset not found.")
 
-    if table_name is None:
-        table_name = next(iter(ds["tables"]))
-    if table_name not in ds["tables"]:
-        raise DiagnosticError(f"Table '{table_name}' not found in this dataset.")
-
-    table_info = ds["tables"][table_name]
-    col_names = _validate_columns(table_info, metric_column, date_column, filters)
-    category_columns = [c["name"] for c in table_info["columns"] if c["inferred_role"] == "category"]
-
     con = catalog.get_connection(dataset_id)
     try:
+        try:
+            table_name, available_columns = multi_table.resolve_base_table(
+                con, dataset_id, metric_column, date_column
+            )
+        except multi_table.MultiTableError as e:
+            raise DiagnosticError(str(e))
+
+        _validate_columns(available_columns, metric_column, date_column, filters)
+        category_columns = [c["name"] for c in available_columns if c["inferred_role"] == "category"]
+
         where_sql, params = _build_where(filters)
         periods_df = con.execute(f"""
             SELECT date_trunc('quarter', {date_column}) AS period, sum({metric_column}) AS value
@@ -160,6 +162,12 @@ def run_diagnostic(dataset_id: str, metric_column: str, date_column: str,
             "latest_value": round(float(latest_row["value"]), 2),
             "prev_value": round(float(prev_row["value"]), 2),
             "pct_change": pct_change,
+            # full history, needed for trend charts -- not just the two
+            # periods being compared
+            "period_series": [
+                {"period": str(r["period"]), "value": round(float(r["value"]), 2)}
+                for _, r in periods_df.iterrows()
+            ],
         }
 
         remaining_dims = [c for c in category_columns if c not in filters]
