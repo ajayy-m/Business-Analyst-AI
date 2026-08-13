@@ -138,3 +138,126 @@ def synthesize_answer(question: str, sql: str, columns: list, rows: list) -> str
     )
 
     return response.choices[0].message.content
+
+
+# ---------------------------------------------------------------------
+# Phase 3: diagnostic classification + root-cause synthesis
+# ---------------------------------------------------------------------
+
+DIAGNOSTIC_EXTRACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "extract_diagnostic_params",
+        "description": (
+            "Decide whether this question needs a root-cause investigation "
+            "(diagnostic) or a simple data lookup, and extract the "
+            "parameters needed to run one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["diagnostic", "lookup"],
+                    "description": (
+                        "'diagnostic' for why/what-caused/what-drove/how-did-X-change "
+                        "questions. 'lookup' for direct factual questions like "
+                        "'what was revenue in Q3' with no investigation implied."
+                    ),
+                },
+                "metric_column": {
+                    "type": "string",
+                    "description": "The numeric column the question is about, e.g. 'revenue'. Must exist in the schema.",
+                },
+                "date_column": {
+                    "type": "string",
+                    "description": "The date column to use for time comparisons. Must exist in the schema.",
+                },
+                "filters": {
+                    "type": "object",
+                    "description": (
+                        "Dimension filters explicitly mentioned in the question, "
+                        "e.g. {\"region\": \"APAC\"}. Empty object if none mentioned -- "
+                        "do not guess filters that weren't stated."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["intent", "metric_column", "date_column", "filters"],
+        },
+    },
+}
+
+CLASSIFY_SYSTEM_PROMPT = """You analyze a business question against a
+database schema to decide how to answer it.
+
+Classify as 'diagnostic' if the question asks why something happened, what
+caused/drove a change, or how something changed over time in a way that
+implies investigation. Classify as 'lookup' for direct factual questions
+that just want a number or list.
+
+Then extract which metric column and date column from the schema are
+relevant, and any dimension filters explicitly stated in the question.
+Only include filters the question actually mentions -- never guess."""
+
+
+def classify_and_extract(question: str, schema_context: str) -> dict:
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=500,
+        messages=[
+            {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
+            {"role": "user", "content": f"SCHEMA:\n{schema_context}\n\nQUESTION: {question}"},
+        ],
+        tools=[DIAGNOSTIC_EXTRACT_TOOL],
+        tool_choice={"type": "function", "function": {"name": "extract_diagnostic_params"}},
+    )
+
+    message = response.choices[0].message
+    if not message.tool_calls:
+        raise ValueError("Model did not return classification.")
+
+    return json.loads(message.tool_calls[0].function.arguments)
+
+
+DIAGNOSTIC_SYNTHESIS_SYSTEM_PROMPT = """You are a business analyst writing
+up the result of a root-cause investigation for a stakeholder.
+
+You will be given a JSON object with:
+- overall: the metric's value in the latest vs previous period, and pct_change
+- level1_driver: the single category (e.g. a product or region) that
+  explains the largest share of that change, with its own contribution_pct
+- level2_driver: optionally, a further breakdown within level1_driver
+  (e.g. a specific region within the product that drove the change)
+- anomaly: a z_score and is_notable flag indicating whether this deviation
+  is statistically unusual or within normal noise
+
+Write a concise summary (3-5 sentences) in this shape, using ONLY the
+numbers provided -- never invent or recompute a number:
+1. State the overall change with its pct_change, formatted as a percentage.
+2. Name the level1_driver and its contribution_pct as the primary cause.
+3. If level2_driver is present, name it as a further concentration within
+   the level1 finding.
+4. If anomaly.is_notable is true, note that this is a statistically
+   significant deviation, not normal variation. If is_notable is false or
+   null, don't claim significance.
+5. End with one specific, concrete recommendation tied to the exact driver
+   found (name the actual category/product/region) -- not generic advice.
+
+Format currency with $ and thousands separators. Format percentages to one
+decimal place."""
+
+
+def synthesize_diagnostic_answer(question: str, findings: dict) -> str:
+    user_msg = f"QUESTION: {question}\n\nFINDINGS:\n{json.dumps(findings, default=str)}"
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=500,
+        messages=[
+            {"role": "system", "content": DIAGNOSTIC_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+
+    return response.choices[0].message.content

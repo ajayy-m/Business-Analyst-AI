@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import groq
 
-from app import ingestion, catalog, sql_safety, agent
+from app import ingestion, catalog, sql_safety, agent, diagnostics
 
 app = FastAPI(title="AI Business Analyst API", version="0.1.0-phase1")
 
@@ -90,18 +90,12 @@ def run_query(dataset_id: str, sql: str = Form(...)):
         raise HTTPException(400, f"Query failed: {e}")
 
 
-@app.post("/datasets/{dataset_id}/ask")
-def ask_question(dataset_id: str, question: str = Form(...)):
+@app.post("/datasets/{dataset_id}/ask/simple")
+def ask_question_simple(dataset_id: str, question: str = Form(...)):
     """
-    The core product loop: natural-language question in, grounded
-    plain-English answer out.
-
-    1. Load the schema catalog (not raw data) for LLM grounding.
-    2. Ask the LLM to generate SQL against that schema.
-    3. Execute it. If it fails, feed the error back to the LLM once and
-       retry -- a minimal self-correction loop.
-    4. Feed the LLM only the computed result (never raw rows beyond what
-       the query returned) to write the final explanation.
+    Phase 2's single-query version -- kept as a fast/cheap path (one SQL
+    query, no multi-step investigation) and as a baseline to compare
+    against the Phase 3 agent below.
     """
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
@@ -116,7 +110,6 @@ def ask_question(dataset_id: str, question: str = Form(...)):
         except sql_safety.UnsafeQueryError as e:
             raise HTTPException(400, str(e))
         except sql_safety.QueryExecutionError as e:
-            # one self-correction attempt
             sql = agent.generate_sql(question, schema_context, error_context=str(e))
             try:
                 result = sql_safety.run_safe_query(dataset_id, sql)
@@ -152,3 +145,91 @@ def ask_question(dataset_id: str, question: str = Form(...)):
         "rows": result["rows"][:50],
         "answer": answer,
     }
+
+
+@app.post("/datasets/{dataset_id}/ask")
+def ask_question(dataset_id: str, question: str = Form(...)):
+    """
+    Phase 3: classifies the question, then routes to one of two paths:
+
+    - 'diagnostic' (why/what-caused/what-drove questions): runs the
+      deterministic root-cause drill-down (app/diagnostics.py) -- checks
+      every dimension in the schema to find what explains the change,
+      recurses one level deeper, and checks whether the deviation is
+      statistically real. The LLM only narrates these pre-computed
+      findings; it never does the arithmetic.
+    - 'lookup' (direct factual questions): falls back to the single-query
+      path from Phase 2.
+    """
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    schema_context = catalog.catalog_as_llm_context(dataset_id)
+
+    try:
+        params = agent.classify_and_extract(question, schema_context)
+
+        if params["intent"] == "diagnostic":
+            try:
+                findings = diagnostics.run_diagnostic(
+                    dataset_id=dataset_id,
+                    metric_column=params["metric_column"],
+                    date_column=params["date_column"],
+                    filters=params.get("filters") or {},
+                )
+            except diagnostics.DiagnosticError as e:
+                raise HTTPException(400, f"Could not run diagnostic: {e}")
+
+            answer = agent.synthesize_diagnostic_answer(question, findings)
+
+            return {
+                "question": question,
+                "intent": "diagnostic",
+                "findings": findings,
+                "answer": answer,
+            }
+
+        # lookup path -- same as /ask/simple
+        sql = agent.generate_sql(question, schema_context)
+        try:
+            result = sql_safety.run_safe_query(dataset_id, sql)
+        except sql_safety.UnsafeQueryError as e:
+            raise HTTPException(400, str(e))
+        except sql_safety.QueryExecutionError as e:
+            sql = agent.generate_sql(question, schema_context, error_context=str(e))
+            try:
+                result = sql_safety.run_safe_query(dataset_id, sql)
+            except sql_safety.QueryExecutionError as e2:
+                raise HTTPException(
+                    400, f"Could not answer this question. Last error: {e2}"
+                )
+
+        answer = agent.synthesize_answer(question, sql, result["columns"], result["rows"])
+
+        return {
+            "question": question,
+            "intent": "lookup",
+            "sql": sql,
+            "columns": result["columns"],
+            "rows": result["rows"][:50],
+            "answer": answer,
+        }
+
+    except groq.AuthenticationError:
+        raise HTTPException(
+            500,
+            "Groq API key is missing or invalid. Check GROQ_API_KEY in your .env file.",
+        )
+    except groq.RateLimitError:
+        raise HTTPException(
+            429,
+            "Groq's free-tier rate limit was hit (30 requests/min). Wait a "
+            "moment and try again.",
+        )
+    except groq.BadRequestError as e:
+        raise HTTPException(500, f"Groq API request error: {e}")
+    except groq.APIConnectionError:
+        raise HTTPException(
+            503, "Couldn't reach the Groq API -- check your internet connection."
+        )
