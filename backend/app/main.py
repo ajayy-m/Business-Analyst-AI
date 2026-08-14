@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import groq
 
 from app.data import ingestion, catalog
-from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard
+from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard, churn
 from app import agent, visualization
 
 app = FastAPI(title="AI Business Analyst API", version="0.1.0-phase1")
@@ -301,3 +301,42 @@ def get_anomalies(dataset_id: str, z_threshold: float = 1.5):
 
     flags = anomaly_dashboard.scan_for_anomalies(dataset_id, z_threshold=z_threshold)
     return {"flags": flags, "count": len(flags)}
+
+
+@app.post("/datasets/{dataset_id}/churn")
+def churn_risk(
+    dataset_id: str,
+    id_column: str = Form(...),
+    metric_column: str = Form(...),
+    date_column: str = Form(...),
+    top_n: int = Form(20),
+):
+    """
+    Trains a logistic regression to predict which customers are likely
+    to go quiet, using a time-based train/test split (train on earlier
+    period transitions, evaluate on a held-out later one -- never lets
+    the model see the future during training). Returns evaluation
+    metrics, feature importance, and a ranked at-risk customer list
+    scored against the most current data.
+
+    This is the one genuinely trained supervised model in the app --
+    forecasting and anomaly detection are statistical, not fit/predict
+    ML. Needs at least 3 time periods of data to have both a training
+    window and a held-out evaluation window.
+    """
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    try:
+        result = churn.train_and_score_churn(
+            dataset_id=dataset_id,
+            id_column=id_column,
+            metric_column=metric_column,
+            date_column=date_column,
+            top_n=top_n,
+        )
+    except churn.ChurnError as e:
+        raise HTTPException(400, str(e))
+
+    return result
