@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  /* Ledger palette -- deliberately not the AI-default cream/terracotta
+     or near-black/neon combos. Grounded in real analyst tooling: deep
+     ink-navy chrome, warm paper surface, and muted red/green as the
+     literal "red ink" convention for losses vs. gains on a ledger. */
+  --color-ink: #1B2430;
+  --color-ink-light: #2A3648;
+  --color-paper: #F7F5F0;
+  --color-paper-dim: #EDEAE2;
+  --color-ledger-blue: #2B4C7E;
+  --color-ledger-blue-light: #3D689E;
+  --color-decline: #B33A3A;
+  --color-gain: #3F7A5C;
+  --color-flag: #C98A2A;
+  --color-line: #D8D3C7;
+  --color-muted: #6B7280;
+
+  --font-display: 'Fraunces', serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+}
+
+/* every number in the product is set in mono -- a deliberate visual
+   marker that this is a computed fact, not narrated prose */
+.figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}

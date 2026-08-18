@@ -16,6 +16,8 @@ __pycache__/
 backend/data/
 backend/uploads/
 
+#Frontend
+frontend/node_modules/
 # IDE / OS
 .vscode/
 .idea/

@@ -17,7 +17,7 @@ import json
 from groq import Groq
 
 client = Groq()  # reads GROQ_API_KEY from the environment
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-120b"  # Groq deprecated the llama-3.3-70b-versatile line; this is their current flagship
 
 SQL_SYSTEM_PROMPT = """You are a SQL analyst working with a DuckDB database.
 You are given a schema (tables, columns, types, sample values) and a
@@ -105,6 +105,10 @@ Formatting:
 - Format currency with a dollar sign and thousands separators, e.g.
   $609,853 -- never raw floats like 609852.98.
 - Round percentages to one decimal place, e.g. 12.4%.
+- Plain prose only -- no markdown (no **bold**, no bullet points, no
+  headers). The UI already highlights key figures with its own evidence
+  chips, so markdown emphasis in the text is redundant and renders as
+  literal asterisks, not bold.
 
 Focus your explanation on the period or category the question is actually
 about -- typically the most recent period, or wherever the change is
@@ -245,7 +249,10 @@ numbers provided -- never invent or recompute a number:
    found (name the actual category/product/region) -- not generic advice.
 
 Format currency with $ and thousands separators. Format percentages to one
-decimal place."""
+decimal place. Plain prose only -- no markdown (no **bold**, no bullet
+points, no headers); the UI's evidence chips already highlight key
+figures, so markdown emphasis would be redundant and renders as literal
+asterisks, not bold."""
 
 
 def synthesize_diagnostic_answer(question: str, findings: dict) -> str:

@@ -14,13 +14,20 @@ VEGA_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json"
 
 def build_trend_chart(period_series: list, metric_label: str) -> dict:
     """Line chart of a metric over time -- the 'overall' picture."""
+    period_values = [p["period"] for p in period_series]
     return {
         "$schema": VEGA_SCHEMA,
         "title": f"{metric_label} by quarter",
         "data": {"values": period_series},
         "mark": {"type": "line", "point": True},
         "encoding": {
-            "x": {"field": "period", "type": "temporal", "title": "Quarter"},
+            "x": {
+                "field": "period", "type": "temporal", "title": "Quarter",
+                # constrain ticks to only the actual data points -- without
+                # this Vega-Lite defaults to a continuous daily scale and
+                # renders dozens of unwanted intermediate tick marks
+                "axis": {"format": "%b %Y", "values": period_values},
+            },
             "y": {"field": "value", "type": "quantitative", "title": metric_label},
             "tooltip": [
                 {"field": "period", "type": "temporal", "title": "Quarter"},
@@ -47,7 +54,10 @@ def build_driver_bar_chart(level1_driver: dict | None, level2_driver: dict | Non
     rows.append({"category": label1, "period": "Latest", "value": level1_driver["value_latest"]})
 
     if level2_driver:
-        label2 = f"{level2_driver['dimension']}: {level2_driver['value']} (within {level1_driver['value']})"
+        # deliberately short -- "(within X)" was getting clipped by the
+        # chart's bottom margin at a rotated angle; the grouping next to
+        # label1 already makes the relationship clear without it
+        label2 = f"{level2_driver['dimension']}: {level2_driver['value']}"
         rows.append({"category": label2, "period": "Previous", "value": level2_driver["value_prev"]})
         rows.append({"category": label2, "period": "Latest", "value": level2_driver["value_latest"]})
 
@@ -57,7 +67,10 @@ def build_driver_bar_chart(level1_driver: dict | None, level2_driver: dict | Non
         "data": {"values": rows},
         "mark": "bar",
         "encoding": {
-            "x": {"field": "category", "type": "nominal", "title": None, "axis": {"labelAngle": -20}},
+            "x": {
+                "field": "category", "type": "nominal", "title": None,
+                "axis": {"labelAngle": -15, "labelLimit": 240, "labelPadding": 4},
+            },
             "y": {"field": "value", "type": "quantitative", "title": metric_label},
             "color": {
                 "field": "period", "type": "nominal", "title": "Period",
@@ -70,8 +83,9 @@ def build_driver_bar_chart(level1_driver: dict | None, level2_driver: dict | Non
                 {"field": "value", "type": "quantitative", "format": ",.0f"},
             ],
         },
-        "width": 400,
-        "height": 280,
+        "width": 480,
+        "height": 300,
+        "padding": {"bottom": 20, "left": 20, "top": 5, "right": 5},
     }
 
 
@@ -83,12 +97,13 @@ def build_forecast_chart(history: list, forecast: list, metric_label: str) -> di
     """
     hist_points = [{"period": h["period"], "value": h["value"], "series": "Historical"} for h in history]
     forecast_points = [{"period": f["period"], "value": f["value"], "series": "Forecast"} for f in forecast]
+    all_periods = [p["period"] for p in hist_points + forecast_points]
 
     band_layer = {
         "data": {"values": forecast},
         "mark": {"type": "area", "opacity": 0.15, "color": "#2a78d6"},
         "encoding": {
-            "x": {"field": "period", "type": "temporal"},
+            "x": {"field": "period", "type": "temporal", "axis": {"format": "%b %Y", "values": all_periods}},
             "y": {"field": "lower", "type": "quantitative"},
             "y2": {"field": "upper"},
         },
@@ -97,7 +112,7 @@ def build_forecast_chart(history: list, forecast: list, metric_label: str) -> di
         "data": {"values": hist_points + forecast_points},
         "mark": {"type": "line", "point": True},
         "encoding": {
-            "x": {"field": "period", "type": "temporal", "title": "Period"},
+            "x": {"field": "period", "type": "temporal", "title": "Period", "axis": {"format": "%b %Y", "values": all_periods}},
             "y": {"field": "value", "type": "quantitative", "title": metric_label},
             "strokeDash": {
                 "field": "series", "type": "nominal",
@@ -145,6 +160,11 @@ def build_chart_from_query_result(columns: list, rows: list) -> dict | None:
 
     # crude date detection by field name, good enough for a default chart
     is_temporal = any(k in x_field.lower() for k in ["date", "period", "quarter", "month", "year"])
+    x_encoding = {"field": x_field, "type": "temporal" if is_temporal else "nominal"}
+    if is_temporal:
+        # same fix as build_trend_chart -- constrain ticks to actual data
+        # points instead of a default continuous daily scale
+        x_encoding["axis"] = {"format": "%b %Y", "values": [r[x_field] for r in rows]}
 
     return {
         "$schema": VEGA_SCHEMA,
@@ -152,7 +172,7 @@ def build_chart_from_query_result(columns: list, rows: list) -> dict | None:
         "data": {"values": rows},
         "mark": {"type": "line", "point": True} if is_temporal else "bar",
         "encoding": {
-            "x": {"field": x_field, "type": "temporal" if is_temporal else "nominal"},
+            "x": x_encoding,
             "y": {"field": y_field, "type": "quantitative"},
             "tooltip": [
                 {"field": x_field},

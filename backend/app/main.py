@@ -122,6 +122,13 @@ def ask_question_simple(dataset_id: str, question: str = Form(...)):
 
         answer = agent.synthesize_answer(question, sql, result["columns"], result["rows"])
 
+    except groq.NotFoundError:
+        raise HTTPException(
+            500,
+            f"The Groq model '{agent.MODEL}' is not available (it may have been "
+            "deprecated). Check https://console.groq.com/docs/models for current "
+            "model names and update MODEL in app/agent.py.",
+        )
     except groq.AuthenticationError:
         raise HTTPException(
             500,
@@ -200,6 +207,8 @@ def ask_question(dataset_id: str, question: str = Form(...)):
                 "findings": findings,
                 "answer": answer,
                 "charts": charts,
+                "metric_column": params["metric_column"],
+                "date_column": params["date_column"],
             }
 
         # lookup path -- same as /ask/simple
@@ -231,6 +240,13 @@ def ask_question(dataset_id: str, question: str = Form(...)):
             "chart": chart,
         }
 
+    except groq.NotFoundError:
+        raise HTTPException(
+            500,
+            f"The Groq model '{agent.MODEL}' is not available (it may have been "
+            "deprecated). Check https://console.groq.com/docs/models for current "
+            "model names and update MODEL in app/agent.py.",
+        )
     except groq.AuthenticationError:
         raise HTTPException(
             500,
@@ -340,3 +356,49 @@ def churn_risk(
         raise HTTPException(400, str(e))
 
     return result
+
+
+@app.post("/datasets/{dataset_id}/diagnose")
+def diagnose_direct(
+    dataset_id: str,
+    metric_column: str = Form(...),
+    date_column: str = Form(...),
+    filters_json: str = Form("{}"),
+):
+    """
+    Same deterministic drill-down as the diagnostic path of /ask, but
+    skips the LLM classification/synthesis steps entirely -- takes
+    metric/date/filters directly. Built for the frontend's click-to-drill
+    interaction (clicking a bar to filter further): needs to feel
+    instant and shouldn't burn an LLM call (or rate-limit budget) on
+    every click. Returns findings + charts, no narrated 'answer' text.
+    """
+    import json as _json
+
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    try:
+        filters = _json.loads(filters_json)
+    except _json.JSONDecodeError:
+        raise HTTPException(400, "filters_json must be valid JSON.")
+
+    try:
+        findings = diagnostics.run_diagnostic(
+            dataset_id=dataset_id,
+            metric_column=metric_column,
+            date_column=date_column,
+            filters=filters,
+        )
+    except diagnostics.DiagnosticError as e:
+        raise HTTPException(400, str(e))
+
+    charts = {
+        "trend": visualization.build_trend_chart(findings["overall"]["period_series"], metric_column),
+        "driver_breakdown": visualization.build_driver_bar_chart(
+            findings["level1_driver"], findings["level2_driver"], metric_column
+        ),
+    }
+
+    return {"findings": findings, "charts": charts}
