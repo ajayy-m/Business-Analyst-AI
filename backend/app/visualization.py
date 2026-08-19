@@ -139,6 +139,56 @@ def build_forecast_chart(history: list, forecast: list, metric_label: str) -> di
     }
 
 
+def build_donut_chart(rows: list, metric_label: str, dim_label: str) -> dict:
+    """
+    Share-of-whole breakdown for a low-cardinality category (few enough
+    distinct values that a legend stays readable). Used by the
+    auto-dashboard composer, never by a targeted diagnostic answer --
+    a donut answers "how does this split up", not "what changed".
+    """
+    return {
+        "$schema": VEGA_SCHEMA,
+        "title": f"{metric_label} by {dim_label}",
+        "data": {"values": rows},
+        "mark": {"type": "arc", "innerRadius": 60},
+        "encoding": {
+            "theta": {"field": "value", "type": "quantitative"},
+            "color": {"field": "category", "type": "nominal", "title": dim_label},
+            "tooltip": [
+                {"field": "category", "type": "nominal", "title": dim_label},
+                {"field": "value", "type": "quantitative", "format": ",.0f", "title": metric_label},
+            ],
+        },
+        "width": 260,
+        "height": 260,
+    }
+
+
+def build_ranked_bar_chart(rows: list, metric_label: str, dim_label: str) -> dict:
+    """
+    Horizontal ranked bar for a higher-cardinality category (too many
+    distinct values for a donut legend to stay readable). Caller is
+    expected to have already truncated `rows` to a top-N + "Other"
+    bucket -- this function just renders whatever it's given, sorted.
+    """
+    return {
+        "$schema": VEGA_SCHEMA,
+        "title": f"Top {dim_label} by {metric_label}",
+        "data": {"values": rows},
+        "mark": "bar",
+        "encoding": {
+            "y": {"field": "category", "type": "nominal", "title": dim_label, "sort": "-x"},
+            "x": {"field": "value", "type": "quantitative", "title": metric_label},
+            "tooltip": [
+                {"field": "category", "type": "nominal", "title": dim_label},
+                {"field": "value", "type": "quantitative", "format": ",.0f", "title": metric_label},
+            ],
+        },
+        "width": 420,
+        "height": 220,
+    }
+
+
 def build_chart_from_query_result(columns: list, rows: list) -> dict | None:
     """
     For the simple lookup path: auto-pick a reasonable chart from a raw

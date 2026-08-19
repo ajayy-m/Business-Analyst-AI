@@ -62,6 +62,12 @@ export async function getAnomalies(datasetId) {
   return handle(res);
 }
 
+export async function getDashboard(datasetId, tableName) {
+  const params = tableName ? `?table_name=${encodeURIComponent(tableName)}` : '';
+  const res = await fetch(`${BASE}/datasets/${datasetId}/dashboard${params}`);
+  return handle(res);
+}
+
 export async function getForecast(datasetId, metricColumn, dateColumn, periodsAhead = 3, granularity = 'month') {
   const form = new URLSearchParams({
     metric_column: metricColumn,

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import groq
 
 from app.data import ingestion, catalog
-from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard, churn
+from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard, churn, dashboard_composer
 from app import agent, visualization
 
 app = FastAPI(title="AI Business Analyst API", version="0.1.0-phase1")
@@ -317,6 +317,28 @@ def get_anomalies(dataset_id: str, z_threshold: float = 1.5):
 
     flags = anomaly_dashboard.scan_for_anomalies(dataset_id, z_threshold=z_threshold)
     return {"flags": flags, "count": len(flags)}
+
+
+@app.get("/datasets/{dataset_id}/dashboard")
+def get_dashboard(dataset_id: str, table_name: str | None = None, max_charts: int = 8):
+    """
+    Auto-generated summary dashboard: KPI cards + a ranked selection of
+    charts, computed the moment data exists -- no question required.
+    See app/analytics/dashboard_composer.py for how chart type and
+    selection are decided (both deterministic, no LLM call here).
+    """
+    ds = catalog.get_dataset_catalog(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found.")
+
+    try:
+        result = dashboard_composer.compose_dashboard(
+            dataset_id=dataset_id, table_name=table_name, max_charts=max_charts
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+    return result
 
 
 @app.post("/datasets/{dataset_id}/churn")
