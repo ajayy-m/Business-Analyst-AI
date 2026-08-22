@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { TrendingUp, TrendingDown, Loader2 } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { TrendingUp, TrendingDown, Loader2, X } from 'lucide-react';
 import { getDashboard } from '../api';
+import { humanize } from '../utils';
 import VegaChart from './VegaChart';
 
 function KpiCard({ kpi }) {
@@ -21,10 +22,70 @@ function KpiCard({ kpi }) {
 }
 
 /**
+ * Tableau-style filter bar: one dropdown per detected category column
+ * (populated from the backend's filter metadata, never hardcoded),
+ * plus a date range if the table has a date column. Changing any of
+ * these re-requests the whole dashboard from the backend, which
+ * recomputes every KPI and chart server-side -- the frontend never
+ * re-derives aggregates from raw rows itself.
+ */
+function FilterBar({ filterMeta, activeFilters, onChange, dateFrom, dateTo, onDateChange, onClear }) {
+  const hasActive = Object.keys(activeFilters).length > 0 || dateFrom || dateTo;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-5 pb-4 border-b border-line">
+      {(filterMeta?.categorical || []).map((f) => (
+        <select
+          key={f.column}
+          value={activeFilters[f.column] || ''}
+          onChange={(e) => onChange(f.column, e.target.value || null)}
+          className={`figure text-xs border rounded-sm px-2 py-1.5 outline-none focus:border-ledger-blue ${
+            activeFilters[f.column] ? 'bg-ledger-blue text-paper border-ledger-blue' : 'bg-white border-line text-ink'
+          }`}
+        >
+          <option value="">{humanize(f.column)}: all</option>
+          {f.values.map((v) => <option key={v} value={v}>{v}</option>)}
+        </select>
+      ))}
+
+      {filterMeta?.date && (
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted">{humanize(filterMeta.date.column)}:</span>
+          <input
+            type="date"
+            value={dateFrom || ''}
+            min={filterMeta.date.min}
+            max={filterMeta.date.max}
+            onChange={(e) => onDateChange(e.target.value || null, dateTo)}
+            className="figure border border-line rounded-sm px-1.5 py-1 outline-none focus:border-ledger-blue"
+          />
+          <span className="text-muted">to</span>
+          <input
+            type="date"
+            value={dateTo || ''}
+            min={filterMeta.date.min}
+            max={filterMeta.date.max}
+            onChange={(e) => onDateChange(dateFrom, e.target.value || null)}
+            className="figure border border-line rounded-sm px-1.5 py-1 outline-none focus:border-ledger-blue"
+          />
+        </div>
+      )}
+
+      {hasActive && (
+        <button onClick={onClear} className="flex items-center gap-1 text-xs text-muted hover:text-decline ml-1">
+          <X size={12} /> Clear filters
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
  * Auto-generated summary dashboard: fetches the composed KPI + chart
  * set the moment data exists, with no question asked. Chart selection
  * and type are entirely decided server-side by dashboard_composer.py
- * -- this component just lays out whatever it's given.
+ * -- this component lays out whatever it's given, plus the filter bar
+ * that drives which slice of the data that composition runs against.
  */
 export default function Dashboard({ datasetId, catalog }) {
   const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
@@ -32,24 +93,53 @@ export default function Dashboard({ datasetId, catalog }) {
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [activeFilters, setActiveFilters] = useState({});
+  const [dateFrom, setDateFrom] = useState(null);
+  const [dateTo, setDateTo] = useState(null);
 
-  // keep the selected table valid as the catalog changes (e.g. after
-  // a new upload) without wiping a still-valid selection
   useEffect(() => {
     if (tableNames.length && !tableNames.includes(tableName)) {
       setTableName(tableNames[0]);
     }
   }, [tableNames.join(','), tableName]);
 
+  // switching tables should reset filters -- they belong to the old table's columns
   useEffect(() => {
+    setActiveFilters({});
+    setDateFrom(null);
+    setDateTo(null);
+  }, [tableName]);
+
+  const refresh = useCallback(() => {
     if (!datasetId || !tableName) return;
     setLoading(true);
     setError(null);
-    getDashboard(datasetId, tableName)
+    getDashboard(datasetId, tableName, { filters: activeFilters, dateFrom, dateTo })
       .then(setDashboard)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [datasetId, tableName]);
+  }, [datasetId, tableName, activeFilters, dateFrom, dateTo]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  function handleFilterChange(column, value) {
+    setActiveFilters((prev) => {
+      const next = { ...prev };
+      if (value) next[column] = value; else delete next[column];
+      return next;
+    });
+  }
+
+  function handleDateChange(from, to) {
+    setDateFrom(from);
+    setDateTo(to);
+  }
+
+  function clearFilters() {
+    setActiveFilters({});
+    setDateFrom(null);
+    setDateTo(null);
+  }
 
   return (
     <div>
@@ -69,6 +159,18 @@ export default function Dashboard({ datasetId, catalog }) {
         </div>
       </div>
 
+      {dashboard?.filters && (dashboard.filters.categorical?.length > 0 || dashboard.filters.date) && (
+        <FilterBar
+          filterMeta={dashboard.filters}
+          activeFilters={activeFilters}
+          onChange={handleFilterChange}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          onDateChange={handleDateChange}
+          onClear={clearFilters}
+        />
+      )}
+
       {loading && <p className="text-sm text-muted flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> Analyzing…</p>}
       {error && <p className="text-sm text-decline">{error}</p>}
       {dashboard?.note && <p className="text-sm text-muted">{dashboard.note}</p>}
@@ -77,6 +179,10 @@ export default function Dashboard({ datasetId, catalog }) {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           {dashboard.kpis.map((k) => <KpiCard key={k.metric} kpi={k} />)}
         </div>
+      )}
+
+      {dashboard?.kpis?.length === 0 && !dashboard?.note && !loading && (
+        <p className="text-sm text-muted mb-6">No data remains for the current filter selection.</p>
       )}
 
       {dashboard?.charts?.length > 0 && (

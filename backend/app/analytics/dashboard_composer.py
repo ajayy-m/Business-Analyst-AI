@@ -63,10 +63,69 @@ def _pct_change(prev, latest):
     return round(((latest - prev) / abs(prev)) * 100, 2)
 
 
+def _select_diverse(candidates: list, max_charts: int) -> list:
+    """
+    Greedy diverse selection instead of a flat top-N by score. Without
+    this, a dataset where the same dimension (e.g. "product") happens to
+    be the most volatile breakdown for several metrics produces a wall
+    of near-identical donuts back to back -- correct information, but a
+    repetitive dashboard. Each pick is penalized for dimensions/chart
+    kinds already chosen, so the result interleaves (donut, trend, bar,
+    donut, ...) instead of clustering, while still favoring the highest
+    raw scores overall.
+    """
+    remaining = list(candidates)
+    selected = []
+    dim_counts: dict = {}
+    kind_counts: dict = {}
+
+    while remaining and len(selected) < max_charts:
+        best_i, best_adjusted = 0, float("-inf")
+        for i, (score, chart) in enumerate(remaining):
+            penalty = 0.5 * dim_counts.get(chart.get("dimension"), 0) + 0.3 * kind_counts.get(chart["kind"], 0)
+            adjusted = score - penalty
+            if adjusted > best_adjusted:
+                best_i, best_adjusted = i, adjusted
+
+        _, chart = remaining.pop(best_i)
+        selected.append(chart)
+        dim_counts[chart.get("dimension")] = dim_counts.get(chart.get("dimension"), 0) + 1
+        kind_counts[chart["kind"]] = kind_counts.get(chart["kind"], 0) + 1
+
+    return selected
+
+
+def _build_filter_where(dim_filters: dict | None, date_column: str | None, date_from: str | None, date_to: str | None):
+    """
+    Same parameterized-WHERE pattern as diagnostics.py's _build_where,
+    extended with a date range. Values are always passed as bound
+    params (never string-interpolated), so a filter value can never
+    become a SQL injection vector even though it comes straight from a
+    query string the user controls.
+    """
+    clauses = []
+    params = []
+    for col, val in (dim_filters or {}).items():
+        clauses.append(f'"{col}" = ?')
+        params.append(val)
+    if date_column and date_from:
+        clauses.append(f'"{date_column}" >= ?')
+        params.append(date_from)
+    if date_column and date_to:
+        clauses.append(f'"{date_column}" <= ?')
+        params.append(date_to)
+    if not clauses:
+        return "", []
+    return "WHERE " + " AND ".join(clauses), params
+
+
 def compose_dashboard(
     dataset_id: str,
     table_name: str | None = None,
     max_charts: int = MAX_CHARTS_DEFAULT,
+    dim_filters: dict | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict:
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
@@ -89,22 +148,48 @@ def compose_dashboard(
         return {
             "kpis": [],
             "charts": [],
+            "filters": {"categorical": [], "date": None},
             "note": "No numeric metric columns were detected in this table, so there's nothing to chart yet.",
         }
 
     date_column = date_columns[0] if date_columns else None
+    where_sql, where_params = _build_filter_where(dim_filters, date_column, date_from, date_to)
 
     con = catalog.get_connection(dataset_id)
     kpis = []
     candidates = []  # list of (score, chart_dict)
+    filter_options = []  # metadata for the frontend filter bar
+    date_bounds = None
 
     try:
+        # Filter-bar metadata: for each category column (regardless of
+        # whether it ends up in a chart), give the frontend its distinct
+        # values so it can render a dropdown -- capped so a near-unique
+        # column doesn't produce an unusable 300-option filter.
+        for dim in category_columns:
+            n_distinct = cardinality.get(dim, 0)
+            if n_distinct > 50:
+                continue
+            values = con.execute(f"""
+                SELECT DISTINCT "{dim}" AS v FROM "{table_name}" WHERE "{dim}" IS NOT NULL ORDER BY 1
+            """).fetchdf()["v"].tolist()
+            filter_options.append({"column": dim, "values": [str(v) for v in values]})
+
+        if date_column:
+            bounds = con.execute(f'SELECT min("{date_column}") AS lo, max("{date_column}") AS hi FROM "{table_name}"').fetchdf()
+            if not bounds.empty:
+                date_bounds = {
+                    "column": date_column,
+                    "min": str(bounds["lo"].iloc[0])[:10],
+                    "max": str(bounds["hi"].iloc[0])[:10],
+                }
+
         for metric in metric_columns:
             if date_column:
                 df = con.execute(f"""
                     SELECT date_trunc('quarter', "{date_column}") AS period, sum("{metric}") AS value
-                    FROM "{table_name}" GROUP BY 1 ORDER BY 1
-                """).fetchdf()
+                    FROM "{table_name}" {where_sql} GROUP BY 1 ORDER BY 1
+                """, where_params).fetchdf()
                 period_series = [
                     {"period": str(r["period"]), "value": round(float(r["value"]), 2)}
                     for _, r in df.iterrows()
@@ -139,6 +224,12 @@ def compose_dashboard(
                     ))
 
             for dim in category_columns:
+                if dim_filters and dim in dim_filters:
+                    # already pinned to one value by the filter bar --
+                    # charting it would just show a single slice/bar,
+                    # so skip it as a breakdown candidate entirely
+                    continue
+
                 n_distinct = cardinality.get(dim, 0)
                 is_high_card = n_distinct > LOW_CARDINALITY_MAX
 
@@ -150,8 +241,8 @@ def compose_dashboard(
                     df_dim = con.execute(f"""
                         SELECT "{dim}" AS category, date_trunc('quarter', "{date_column}") AS period,
                                sum("{metric}") AS value
-                        FROM "{table_name}" GROUP BY 1, 2 ORDER BY 1, 2
-                    """).fetchdf()
+                        FROM "{table_name}" {where_sql} GROUP BY 1, 2 ORDER BY 1, 2
+                    """, where_params).fetchdf()
                     best_z = None
                     for _, group in df_dim.groupby("category"):
                         group = group.sort_values("period")
@@ -165,12 +256,14 @@ def compose_dashboard(
                 if _is_location_column(dim):
                     score += 0.1  # slight preference for place-like breakdowns
 
+                not_null_clause = f'"{dim}" IS NOT NULL'
+                combined_where = f"{where_sql} AND {not_null_clause}" if where_sql else f"WHERE {not_null_clause}"
                 totals = con.execute(f"""
                     SELECT "{dim}" AS category, sum("{metric}") AS value
                     FROM "{table_name}"
-                    WHERE "{dim}" IS NOT NULL
+                    {combined_where}
                     GROUP BY 1 ORDER BY 2 DESC
-                """).fetchdf()
+                """, where_params).fetchdf()
                 if totals.empty:
                     continue
                 rows = [
@@ -197,6 +290,10 @@ def compose_dashboard(
         con.close()
 
     candidates.sort(key=lambda c: c[0], reverse=True)
-    charts = [c[1] for c in candidates[:max_charts]]
+    charts = _select_diverse(candidates, max_charts)
 
-    return {"kpis": kpis, "charts": charts}
+    return {
+        "kpis": kpis,
+        "charts": charts,
+        "filters": {"categorical": filter_options, "date": date_bounds},
+    }

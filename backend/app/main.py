@@ -1,3 +1,4 @@
+import json
 import shutil
 import uuid
 from pathlib import Path
@@ -177,14 +178,40 @@ def ask_question(dataset_id: str, question: str = Form(...)):
     schema_context = catalog.catalog_as_llm_context(dataset_id)
 
     try:
-        params = agent.classify_and_extract(question, schema_context)
+        try:
+            params = agent.classify_and_extract(question, schema_context)
+        except (groq.NotFoundError, groq.AuthenticationError, groq.RateLimitError,
+                 groq.BadRequestError, groq.APIConnectionError):
+            # A real API failure, not a bad response -- let it propagate
+            # to the friendly-error handlers below rather than being
+            # mislabeled as "couldn't classify the question".
+            raise
+        except Exception:
+            # The model returned something we couldn't parse (e.g. a
+            # malformed tool call) -- fall back to a meta answer rather
+            # than crashing outright.
+            answer = agent.synthesize_meta_answer(question, schema_context)
+            return {"question": question, "intent": "meta", "answer": answer}
+
+        if params["intent"] == "meta":
+            answer = agent.synthesize_meta_answer(question, schema_context)
+            return {"question": question, "intent": "meta", "answer": answer}
 
         if params["intent"] == "diagnostic":
+            metric_column = params.get("metric_column")
+            date_column = params.get("date_column")
+            if not metric_column or not date_column:
+                # Model said 'diagnostic' but couldn't pin down which
+                # metric/date column -- fall back to a meta-style answer
+                # rather than crashing on a missing key.
+                answer = agent.synthesize_meta_answer(question, schema_context)
+                return {"question": question, "intent": "meta", "answer": answer}
+
             try:
                 findings = diagnostics.run_diagnostic(
                     dataset_id=dataset_id,
-                    metric_column=params["metric_column"],
-                    date_column=params["date_column"],
+                    metric_column=metric_column,
+                    date_column=date_column,
                     filters=params.get("filters") or {},
                 )
             except diagnostics.DiagnosticError as e:
@@ -194,10 +221,10 @@ def ask_question(dataset_id: str, question: str = Form(...)):
 
             charts = {
                 "trend": visualization.build_trend_chart(
-                    findings["overall"]["period_series"], params["metric_column"]
+                    findings["overall"]["period_series"], metric_column
                 ),
                 "driver_breakdown": visualization.build_driver_bar_chart(
-                    findings["level1_driver"], findings["level2_driver"], params["metric_column"]
+                    findings["level1_driver"], findings["level2_driver"], metric_column
                 ),
             }
 
@@ -207,8 +234,8 @@ def ask_question(dataset_id: str, question: str = Form(...)):
                 "findings": findings,
                 "answer": answer,
                 "charts": charts,
-                "metric_column": params["metric_column"],
-                "date_column": params["date_column"],
+                "metric_column": metric_column,
+                "date_column": date_column,
             }
 
         # lookup path -- same as /ask/simple
@@ -320,10 +347,21 @@ def get_anomalies(dataset_id: str, z_threshold: float = 1.5):
 
 
 @app.get("/datasets/{dataset_id}/dashboard")
-def get_dashboard(dataset_id: str, table_name: str | None = None, max_charts: int = 8):
+def get_dashboard(
+    dataset_id: str,
+    table_name: str | None = None,
+    max_charts: int = 8,
+    filters_json: str = "{}",
+    date_from: str | None = None,
+    date_to: str | None = None,
+):
     """
     Auto-generated summary dashboard: KPI cards + a ranked selection of
     charts, computed the moment data exists -- no question required.
+    `filters_json` (a JSON object like {"region": "APAC"}) and
+    date_from/date_to implement the Tableau-style filter bar: every KPI
+    and chart is recomputed with these applied, server-side, so the
+    frontend never has to re-derive aggregates from raw rows.
     See app/analytics/dashboard_composer.py for how chart type and
     selection are decided (both deterministic, no LLM call here).
     """
@@ -332,8 +370,18 @@ def get_dashboard(dataset_id: str, table_name: str | None = None, max_charts: in
         raise HTTPException(404, "Dataset not found.")
 
     try:
+        dim_filters = json.loads(filters_json) if filters_json else {}
+    except json.JSONDecodeError:
+        raise HTTPException(400, "filters_json must be valid JSON.")
+
+    try:
         result = dashboard_composer.compose_dashboard(
-            dataset_id=dataset_id, table_name=table_name, max_charts=max_charts
+            dataset_id=dataset_id,
+            table_name=table_name,
+            max_charts=max_charts,
+            dim_filters=dim_filters,
+            date_from=date_from,
+            date_to=date_to,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

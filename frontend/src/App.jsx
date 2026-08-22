@@ -63,7 +63,7 @@ export default function App() {
             </p>
           )}
           {catalog && tab === 'dashboard' && <Dashboard datasetId={datasetId} catalog={catalog} />}
-          {catalog && tab === 'ask' && <AskPanel datasetId={datasetId} />}
+          {catalog && tab === 'ask' && <AskPanel datasetId={datasetId} catalog={catalog} />}
           {catalog && tab === 'forecast' && <ForecastPanel datasetId={datasetId} catalog={catalog} />}
           {catalog && tab === 'churn' && <ChurnPanel datasetId={datasetId} catalog={catalog} />}
         </div>

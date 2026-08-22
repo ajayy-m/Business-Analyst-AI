@@ -153,29 +153,43 @@ DIAGNOSTIC_EXTRACT_TOOL = {
     "function": {
         "name": "extract_diagnostic_params",
         "description": (
-            "Decide whether this question needs a root-cause investigation "
-            "(diagnostic) or a simple data lookup, and extract the "
-            "parameters needed to run one."
+            "Decide how to answer this question -- as a root-cause "
+            "investigation, a simple data lookup, or a question about "
+            "the dataset's structure -- and extract whatever parameters "
+            "that path needs."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "intent": {
                     "type": "string",
-                    "enum": ["diagnostic", "lookup"],
+                    "enum": ["diagnostic", "lookup", "meta"],
                     "description": (
                         "'diagnostic' for why/what-caused/what-drove/how-did-X-change "
-                        "questions. 'lookup' for direct factual questions like "
-                        "'what was revenue in Q3' with no investigation implied."
+                        "questions about the DATA. 'lookup' for direct factual "
+                        "questions about the data, e.g. 'what was revenue in Q3'. "
+                        "'meta' for questions about the DATASET ITSELF rather than "
+                        "its values -- e.g. 'what columns/metrics does this dataset "
+                        "have', 'what does column X represent', 'how many rows are "
+                        "there', 'what tables exist'. Use 'meta' whenever the "
+                        "question is about structure/schema, not a computed number."
                     ),
                 },
                 "metric_column": {
                     "type": "string",
-                    "description": "The numeric column the question is about, e.g. 'revenue'. Must exist in the schema.",
+                    "description": (
+                        "The numeric column the question is about, e.g. 'revenue'. "
+                        "Must exist in the schema. Only needed for 'diagnostic' "
+                        "intent -- omit for 'lookup' and 'meta'."
+                    ),
                 },
                 "date_column": {
                     "type": "string",
-                    "description": "The date column to use for time comparisons. Must exist in the schema.",
+                    "description": (
+                        "The date column to use for time comparisons. Must exist "
+                        "in the schema. Only needed for 'diagnostic' intent -- "
+                        "omit for 'lookup' and 'meta'."
+                    ),
                 },
                 "filters": {
                     "type": "object",
@@ -187,7 +201,7 @@ DIAGNOSTIC_EXTRACT_TOOL = {
                     "additionalProperties": {"type": "string"},
                 },
             },
-            "required": ["intent", "metric_column", "date_column", "filters"],
+            "required": ["intent"],
         },
     },
 }
@@ -198,11 +212,18 @@ database schema to decide how to answer it.
 Classify as 'diagnostic' if the question asks why something happened, what
 caused/drove a change, or how something changed over time in a way that
 implies investigation. Classify as 'lookup' for direct factual questions
-that just want a number or list.
+that just want a computed number or list from the DATA. Classify as 'meta'
+for questions about the dataset's STRUCTURE rather than its values -- what
+columns/metrics/tables exist, what a column represents, how many rows
+there are, what kind of data this is. A question with no clear metric or
+time period in it, asking about the dataset in general, is almost always
+'meta'.
 
-Then extract which metric column and date column from the schema are
-relevant, and any dimension filters explicitly stated in the question.
-Only include filters the question actually mentions -- never guess."""
+For 'diagnostic' questions, also extract which metric column and date
+column from the schema are relevant, and any dimension filters explicitly
+stated in the question. Only include filters the question actually
+mentions -- never guess. For 'lookup' and 'meta' questions, you do not
+need to extract metric_column or date_column."""
 
 
 def classify_and_extract(question: str, schema_context: str) -> dict:
@@ -253,6 +274,44 @@ decimal place. Plain prose only -- no markdown (no **bold**, no bullet
 points, no headers); the UI's evidence chips already highlight key
 figures, so markdown emphasis would be redundant and renders as literal
 asterisks, not bold."""
+
+
+META_SYSTEM_PROMPT = """You are describing a dataset's structure to a
+business user who understands analytics but has no data-engineering
+background. You will be given the dataset's schema -- table names,
+column names, each column's inferred role (date/id/category/metric/text),
+data type, row counts, distinct-value counts, and a few sample values.
+
+Answer the question using ONLY what's in the schema below. You may
+reasonably describe what a column likely represents based on its name
+and role (e.g. a 'metric' column named 'revenue' represents sales
+revenue) -- but never invent statistics, business context, or specifics
+that aren't present in the schema. If something genuinely can't be
+determined from the schema, say so plainly rather than guessing
+confidently.
+
+Keep it complete within the space you have: if several columns share an
+obvious naming pattern (e.g. q_p1, q_p2, q_p3, q_p4), describe the
+pattern ONCE ("q_p1 through q_p4 are numeric values for four periods or
+categories, exact meaning unclear from the name alone") rather than a
+full repeated sentence per column -- a full answer that covers every
+table concisely is more useful than an exhaustive one that gets cut off
+partway through.
+
+Formatting: plain prose only, no markdown (no **bold**, no bullet
+points, no headers) -- the UI renders this as plain text."""
+
+
+def synthesize_meta_answer(question: str, schema_context: str) -> str:
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=800,
+        messages=[
+            {"role": "system", "content": META_SYSTEM_PROMPT},
+            {"role": "user", "content": f"SCHEMA:\n{schema_context}\n\nQUESTION: {question}"},
+        ],
+    )
+    return response.choices[0].message.content
 
 
 def synthesize_diagnostic_answer(question: str, findings: dict) -> str:

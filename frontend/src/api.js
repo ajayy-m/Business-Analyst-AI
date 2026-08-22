@@ -62,9 +62,14 @@ export async function getAnomalies(datasetId) {
   return handle(res);
 }
 
-export async function getDashboard(datasetId, tableName) {
-  const params = tableName ? `?table_name=${encodeURIComponent(tableName)}` : '';
-  const res = await fetch(`${BASE}/datasets/${datasetId}/dashboard${params}`);
+export async function getDashboard(datasetId, tableName, opts = {}) {
+  const params = new URLSearchParams();
+  if (tableName) params.set('table_name', tableName);
+  if (opts.filters && Object.keys(opts.filters).length) params.set('filters_json', JSON.stringify(opts.filters));
+  if (opts.dateFrom) params.set('date_from', opts.dateFrom);
+  if (opts.dateTo) params.set('date_to', opts.dateTo);
+  const qs = params.toString();
+  const res = await fetch(`${BASE}/datasets/${datasetId}/dashboard${qs ? `?${qs}` : ''}`);
   return handle(res);
 }
 
