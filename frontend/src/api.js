@@ -73,13 +73,14 @@ export async function getDashboard(datasetId, tableName, opts = {}) {
   return handle(res);
 }
 
-export async function getForecast(datasetId, metricColumn, dateColumn, periodsAhead = 3, granularity = 'month') {
+export async function getForecast(datasetId, metricColumn, dateColumn, periodsAhead = 3, granularity = 'month', tableName = null) {
   const form = new URLSearchParams({
     metric_column: metricColumn,
     date_column: dateColumn,
     periods_ahead: periodsAhead,
     granularity,
   });
+  if (tableName) form.set('table_name', tableName);
   const res = await fetch(`${BASE}/datasets/${datasetId}/forecast`, {
     method: 'POST',
     body: form,
@@ -87,13 +88,14 @@ export async function getForecast(datasetId, metricColumn, dateColumn, periodsAh
   return handle(res);
 }
 
-export async function getChurn(datasetId, idColumn, metricColumn, dateColumn, topN = 20) {
+export async function getChurn(datasetId, idColumn, metricColumn, dateColumn, topN = 20, tableName = null) {
   const form = new URLSearchParams({
     id_column: idColumn,
     metric_column: metricColumn,
     date_column: dateColumn,
     top_n: topN,
   });
+  if (tableName) form.set('table_name', tableName);
   const res = await fetch(`${BASE}/datasets/${datasetId}/churn`, {
     method: 'POST',
     body: form,

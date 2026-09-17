@@ -29,6 +29,7 @@ def forecast_metric(
     filters: dict | None = None,
     periods_ahead: int = 3,
     granularity: str = "month",
+    table_name: str | None = None,
 ) -> dict:
     filters = filters or {}
     ds = catalog.get_dataset_catalog(dataset_id)
@@ -39,12 +40,26 @@ def forecast_metric(
 
     con = catalog.get_connection(dataset_id)
     try:
-        try:
-            table_name, available_columns = multi_table.resolve_base_table(
-                con, dataset_id, metric_column, date_column
-            )
-        except multi_table.MultiTableError as e:
-            raise ForecastError(str(e))
+        if table_name is not None:
+            # Caller already knows exactly which table this is (the
+            # frontend now sends this from its own table selector) --
+            # use it directly rather than guessing by column name.
+            # Column names like "revenue"/"order_date" routinely repeat
+            # across unrelated uploaded tables, and resolve_base_table
+            # picks the FIRST table it finds with matching names, which
+            # silently runs the forecast against the wrong dataset
+            # whenever two tables share those names -- exactly the bug
+            # this branch exists to avoid.
+            if table_name not in ds["tables"]:
+                raise ForecastError(f"Table '{table_name}' not found.")
+            available_columns = ds["tables"][table_name]["columns"]
+        else:
+            try:
+                table_name, available_columns = multi_table.resolve_base_table(
+                    con, dataset_id, metric_column, date_column
+                )
+            except multi_table.MultiTableError as e:
+                raise ForecastError(str(e))
 
         col_names = {c["name"]: c for c in available_columns}
         if metric_column not in col_names or col_names[metric_column]["inferred_role"] != "metric":

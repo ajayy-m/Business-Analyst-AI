@@ -93,6 +93,7 @@ def train_and_score_churn(
     metric_column: str,
     date_column: str,
     top_n: int = 20,
+    table_name: str | None = None,
 ) -> dict:
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
@@ -100,12 +101,23 @@ def train_and_score_churn(
 
     con = catalog.get_connection(dataset_id)
     try:
-        try:
-            table_name, available_columns = multi_table.resolve_base_table(
-                con, dataset_id, metric_column, date_column
-            )
-        except multi_table.MultiTableError as e:
-            raise ChurnError(str(e))
+        if table_name is not None:
+            # See the identical branch in forecasting.forecast_metric --
+            # column names like "customer_id"/"revenue"/"order_date"
+            # routinely repeat across unrelated uploaded tables, and the
+            # name-based auto-detect below silently picks whichever
+            # table happens to be first, which can train the churn
+            # model on the wrong dataset entirely.
+            if table_name not in ds["tables"]:
+                raise ChurnError(f"Table '{table_name}' not found.")
+            available_columns = ds["tables"][table_name]["columns"]
+        else:
+            try:
+                table_name, available_columns = multi_table.resolve_base_table(
+                    con, dataset_id, metric_column, date_column
+                )
+            except multi_table.MultiTableError as e:
+                raise ChurnError(str(e))
 
         col_names = {c["name"] for c in available_columns}
         if id_column not in col_names:
@@ -194,15 +206,37 @@ def train_and_score_churn(
             current_features.sort_values("churn_probability", ascending=False)
             .head(top_n)[["customer_id", "churn_probability", "recency_days", "frequency", "monetary"]]
         )
+        # Deliberately NOT exposing the raw probability to the end user.
+        # A bare "92.4%" reads as a fact with the same visual confidence
+        # as a real computed number elsewhere in this app, when it's
+        # actually a small model's point estimate -- exactly the kind of
+        # overclaiming this app's "every number, traceable" principle
+        # exists to avoid. Tiering by RANK WITHIN THIS LIST (not a fixed
+        # probability threshold) instead: since this table only ever
+        # shows the top N most-at-risk customers to begin with, a fixed
+        # threshold like ">0.8 = high risk" would label nearly everyone
+        # "high" whenever the model is confident (as in this dataset,
+        # where the top 8 are all >0.98) and say nothing useful. Rank
+        # within the batch stays meaningful regardless of how spread out
+        # the underlying probabilities happen to be.
+        n = len(at_risk)
+        tier_bounds = (max(1, round(n / 3)), max(1, round(2 * n / 3)))
+        def _tier(rank: int) -> str:
+            if rank < tier_bounds[0]:
+                return "Highest risk"
+            if rank < tier_bounds[1]:
+                return "High risk"
+            return "Elevated risk"
+
         at_risk_list = [
             {
                 "customer_id": str(r["customer_id"]),
-                "churn_probability": round(float(r["churn_probability"]), 3),
+                "risk_tier": _tier(rank),
                 "recency_days": int(r["recency_days"]),
                 "frequency": int(r["frequency"]),
                 "monetary": round(float(r["monetary"]), 2),
             }
-            for _, r in at_risk.iterrows()
+            for rank, (_, r) in enumerate(at_risk.iterrows())
         ]
 
         return {

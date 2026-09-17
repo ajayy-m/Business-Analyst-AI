@@ -292,8 +292,32 @@ def compose_dashboard(
     candidates.sort(key=lambda c: c[0], reverse=True)
     charts = _select_diverse(candidates, max_charts)
 
-    return {
+    result = {
         "kpis": kpis,
         "charts": charts,
         "filters": {"categorical": filter_options, "date": date_bounds},
     }
+
+    if not kpis and not charts and not date_column and not category_columns:
+        # Distinct from "no metric columns at all" above -- this table
+        # HAS real metrics (e.g. revenue), just nothing to hang a KPI
+        # trend or breakdown chart on: no date column, and no category
+        # column survived the >=2-distinct-values filter either (often
+        # because every category column either got mislabeled "text"
+        # by ingestion -- e.g. a date column that failed to parse, or a
+        # dimension fragmented across near-duplicate labels -- or was
+        # genuinely constant). Without this, the frontend's fallback
+        # "no data remains for the current filter selection" message is
+        # actively wrong here: no filter is even active, and clearing
+        # filters would change nothing. Silence here isn't a bug in the
+        # data, but showing nothing with no explanation looks like one.
+        result["note"] = (
+            f"This table has {len(metric_columns)} metric column"
+            f"{'s' if len(metric_columns) != 1 else ''} (e.g. \"{metric_columns[0]}\") "
+            "but no date column and no category column to break them down "
+            "by, so there's nothing to build a KPI trend or breakdown "
+            "chart from yet. This isn't a filter issue -- try asking about "
+            "the metric directly in the Ask tab instead."
+        )
+
+    return result

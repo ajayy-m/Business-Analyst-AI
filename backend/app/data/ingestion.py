@@ -1,14 +1,46 @@
 """
 Ingestion service: turns an uploaded CSV/Excel file into a queryable
 DuckDB table plus catalog metadata.
+
+Hardened against common messy-real-world-export patterns (see
+HANDOFF_v2.md section 6 for the stress-test writeup that motivated
+this pass):
+  - a title row sitting above the real header row (manual Excel exports)
+  - currency symbols / thousands separators in numeric columns
+  - percent signs in numeric columns
+  - accounting-style parenthesis negatives, e.g. "(123.45)"
+  - leading/trailing whitespace in header AND value cells
+  - fully blank rows
+  - ID columns that would otherwise get silently re-typed as numbers,
+    destroying leading zeros (e.g. "00123" -> 123)
+  - date columns with inconsistent formats: previously these were still
+    labeled role="date" even when parsing failed and the column stayed
+    text, which crashed the dashboard/forecast SQL (date_trunc on a
+    VARCHAR). Role is now only ever "date" when the column actually
+    parsed to a real datetime dtype.
+
+Deliberately NOT attempted here: fuzzy category normalization (e.g.
+merging "USA" / "U.S.A." / "United States"). That needs a lookup table
+or LLM judgment call, not a safe automatic rule -- documented as a
+known limitation rather than silently "fixed" in a way that could merge
+things that shouldn't be merged.
 """
 import re
+from collections import Counter
+
 import pandas as pd
 from app.data import catalog
 
 
 DATE_KEYWORDS = {"date", "created", "updated", "timestamp", "time"}
 ID_KEYWORDS = {"id", "_id", "code", "sku", "uuid"}
+
+_CURRENCY_CHARS_RE = re.compile(r"[$£€,]")
+_PAREN_NEGATIVE_RE = re.compile(r"^\((.*)\)$")
+_NULLISH_STRINGS = {"", "nan", "none", "null", "n/a", "na", "-"}
+
+_HEADER_SCAN_MAX_ROWS = 15
+_RAGGED_ROW_PEEK_WIDTH = 1000
 
 
 def _clean_column_name(name: str) -> str:
@@ -18,9 +50,176 @@ def _clean_column_name(name: str) -> str:
     return name or "unnamed_col"
 
 
-def _infer_role(col_name: str, series: pd.Series) -> str:
+def _is_blank_cell(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, float) and pd.isna(v):
+        return True
+    return str(v).strip() == ""
+
+
+def _count_nonempty(row) -> int:
+    return sum(1 for c in row if not _is_blank_cell(c))
+
+
+def _read_raw_rows(file_path: str, filename: str, max_scan: int = _HEADER_SCAN_MAX_ROWS) -> list:
+    """Peek at the first few raw rows (no header assumed) so we can
+    detect whether row 0 is a real header or a title/banner row.
+
+    Deliberately uses pandas' own row-numbering convention (which
+    defaults to skip_blank_lines=True) rather than a raw csv.reader.
+    csv.reader counts every physical line including blank ones, but
+    pandas' `header=N` parameter counts rows *after* blank lines are
+    dropped -- so a raw csv.reader scan and the real pd.read_csv(header=N)
+    call disagree on what row N means whenever a blank line sits above
+    the header (e.g. a title row followed by a blank spacer row before
+    the real header), silently pointing the header detection at the
+    wrong row. Reading the peek with pandas itself keeps the indices
+    consistent with the real read that follows."""
+    if filename.lower().endswith((".xlsx", ".xls")):
+        raw = pd.read_excel(file_path, header=None, nrows=max_scan)
+        return raw.values.tolist()
+    # A title row has far fewer fields than the real header/data rows
+    # (e.g. one free-text cell vs. eight columns), so a plain
+    # header=None read would infer its column count from row 0 and then
+    # error out ("Expected 1 fields, saw 8") once it hits a wider row.
+    # Pinning a generous fixed column count sidesteps that: pandas pads
+    # every row to the same width with NaN instead of validating it.
+    raw = pd.read_csv(
+        file_path, header=None, nrows=max_scan, dtype=str,
+        names=range(_RAGGED_ROW_PEEK_WIDTH),
+        skip_blank_lines=True, keep_default_na=True,
+    )
+    return raw.values.tolist()
+
+
+def _detect_header_row(rows: list) -> int:
+    """
+    Finds the most likely header row index. Handles the common manual-
+    export pattern of a single-cell title row (and maybe a blank row)
+    sitting above the real header: a title row has very few non-empty
+    cells compared to the header/data rows below it, so we look for the
+    first row whose non-empty cell count is close to the "typical" row
+    width rather than blindly trusting row 0.
+    """
+    if not rows:
+        return 0
+    counts = [_count_nonempty(r) for r in rows]
+    candidates = [c for c in counts if c > 1]
+    if not candidates:
+        return 0
+    mode_count = Counter(candidates).most_common(1)[0][0]
+    threshold = max(2, int(mode_count * 0.7))
+    for i, c in enumerate(counts):
+        if c >= threshold:
+            return i
+    return 0
+
+
+def parse_file(file_path: str, filename: str) -> tuple[pd.DataFrame, int]:
+    """Returns (dataframe, header_row_index_used). Everything is read as
+    string first -- numeric/date typing happens explicitly afterwards so
+    we control exactly how currency symbols, percents, parens, and
+    leading-zero IDs are handled, instead of leaving it to pandas'
+    automatic dtype inference."""
+    header_row = _detect_header_row(_read_raw_rows(file_path, filename))
+    if filename.lower().endswith((".xlsx", ".xls")):
+        df = pd.read_excel(file_path, header=header_row, dtype=str)
+    else:
+        df = pd.read_csv(file_path, header=header_row, dtype=str, keep_default_na=True)
+    return df, header_row
+
+
+def _strip_whitespace_values(df: pd.DataFrame) -> None:
+    """In-place: trims leading/trailing whitespace from every string
+    cell. Column-name whitespace is already handled by
+    _clean_column_name; this covers the value-level case (e.g.
+    " Gamma Inc" vs "Gamma Inc" silently fragmenting a category)."""
+    for col in df.columns:
+        df[col] = df[col].apply(lambda v: v.strip() if isinstance(v, str) else v)
+
+
+def _drop_blank_rows(df: pd.DataFrame) -> int:
+    """In-place-ish: returns a new-index df with fully-blank rows
+    removed, and the count removed (common in manual Excel exports as
+    spacer rows)."""
+    blank_mask = df.apply(lambda row: all(_is_blank_cell(v) for v in row), axis=1)
+    return int(blank_mask.sum())
+
+
+def _try_parse_dates(df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Attempt to parse likely date columns (by name). Returns
+    (converted, attempted_but_failed) so callers can warn about the
+    latter instead of silently mislabeling a text column as a date."""
+    converted = []
+    attempted_but_failed = []
+    for col in df.columns:
+        lname = col.lower()
+        if not any(k in lname for k in DATE_KEYWORDS):
+            continue
+        try:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+        except Exception:
+            attempted_but_failed.append(col)
+            continue
+        # only accept if most values parsed successfully -- a column
+        # with genuinely mixed/inconsistent date formats should stay
+        # text rather than silently losing half its rows to NaT.
+        non_null_original = df[col].notna().sum()
+        if non_null_original > 0 and (parsed.notna().sum() / non_null_original) > 0.8:
+            df[col] = parsed
+            converted.append(col)
+        else:
+            attempted_but_failed.append(col)
+    return converted, attempted_but_failed
+
+
+def _clean_numeric_value(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    if s.lower() in _NULLISH_STRINGS:
+        return None
+    negative = False
+    m = _PAREN_NEGATIVE_RE.match(s)
+    if m:
+        negative = True
+        s = m.group(1).strip()
+    s = s.replace("%", "")
+    s = _CURRENCY_CHARS_RE.sub("", s)
+    s = s.strip()
+    if s == "":
+        return None
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    return -val if negative else val
+
+
+def _try_clean_numeric_column(series: pd.Series) -> pd.Series | None:
+    """Attempts to coerce a text column into numbers by stripping
+    currency symbols, thousands separators, percent signs, and
+    accounting-style parenthesis negatives. Only accepted if the large
+    majority of non-null values convert cleanly -- a genuinely
+    non-numeric text column should be left alone."""
+    non_null_original = series.notna().sum()
+    if non_null_original == 0:
+        return None
+    cleaned = series.apply(_clean_numeric_value)
+    if (cleaned.notna().sum() / non_null_original) >= 0.8:
+        return cleaned
+    return None
+
+
+def _infer_role(col_name: str, series: pd.Series, is_parsed_date: bool = False) -> str:
     lname = col_name.lower()
-    if any(k in lname for k in DATE_KEYWORDS) or pd.api.types.is_datetime64_any_dtype(series):
+    # "date" is only ever assigned when the column actually parsed to a
+    # real datetime dtype -- a column that merely has a date-ish name
+    # but failed to parse (inconsistent formats etc.) must NOT get this
+    # role, since downstream SQL (date_trunc, forecasting) trusts the
+    # role and will crash against a VARCHAR column.
+    if is_parsed_date or pd.api.types.is_datetime64_any_dtype(series):
         return "date"
     if any(k in lname for k in ID_KEYWORDS):
         return "id"
@@ -32,30 +231,6 @@ def _infer_role(col_name: str, series: pd.Series) -> str:
     if series.nunique() / max(len(series), 1) < 0.5:
         return "category"
     return "text"
-
-
-def _try_parse_dates(df: pd.DataFrame) -> list[str]:
-    """Attempt to parse likely date columns; return list of columns converted."""
-    converted = []
-    for col in df.columns:
-        if pd.api.types.is_string_dtype(df[col]) or df[col].dtype == object:
-            lname = col.lower()
-            if any(k in lname for k in DATE_KEYWORDS):
-                try:
-                    parsed = pd.to_datetime(df[col], errors="coerce")
-                    # only accept if most values parsed successfully
-                    if parsed.notna().mean() > 0.8:
-                        df[col] = parsed
-                        converted.append(col)
-                except Exception:
-                    pass
-    return converted
-
-
-def parse_file(file_path: str, filename: str) -> pd.DataFrame:
-    if filename.lower().endswith((".xlsx", ".xls")):
-        return pd.read_excel(file_path)
-    return pd.read_csv(file_path)
 
 
 def validate_dataframe(df: pd.DataFrame) -> list[str]:
@@ -74,21 +249,69 @@ def validate_dataframe(df: pd.DataFrame) -> list[str]:
 
 
 def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str) -> dict:
-    df = parse_file(file_path, filename)
+    df, header_row = parse_file(file_path, filename)
 
     # clean column names
     df.columns = [_clean_column_name(c) for c in df.columns]
 
-    # attempt date parsing before validation/profiling
-    date_cols_converted = _try_parse_dates(df)
+    warnings = []
+    if header_row > 0:
+        warnings.append(
+            f"Detected {header_row} row(s) above the real header (e.g. a title "
+            f"row) and skipped them."
+        )
 
-    warnings = validate_dataframe(df)
+    # value-level whitespace, then drop spacer/blank rows, before any
+    # typing decisions are made
+    _strip_whitespace_values(df)
+    blank_rows_dropped = _drop_blank_rows(df)
+    if blank_rows_dropped:
+        df = df[~df.apply(lambda row: all(_is_blank_cell(v) for v in row), axis=1)].reset_index(drop=True)
+        warnings.append(f"{blank_rows_dropped} fully blank row(s) removed.")
+
+    # attempt date parsing before numeric cleaning / profiling
+    date_cols_converted, date_cols_failed = _try_parse_dates(df)
+    for col in date_cols_failed:
+        warnings.append(
+            f"Column '{col}' looks like a date but has inconsistent or "
+            f"unparseable formats -- kept as text rather than guessing."
+        )
+
+    # attempt numeric cleaning (currency symbols, %, thousands separators,
+    # accounting negatives) on everything that isn't an ID column (IDs are
+    # kept as raw strings so leading zeros like "00123" survive) or an
+    # already-converted date column
+    numeric_cols_cleaned = []
+    for col in df.columns:
+        lname = col.lower()
+        if any(k in lname for k in ID_KEYWORDS):
+            continue
+        if col in date_cols_converted:
+            continue
+        # Every remaining column was read with dtype=str (see parse_file),
+        # so it's still text at this point -- but which text dtype that
+        # actually is depends on the pandas version: older pandas gives
+        # plain numpy `object`, pandas 3.x's dtype=str gives its own
+        # StringDtype, which fails a strict `== object` check. Checking
+        # via pandas' own dtype-kind helper instead of a hardcoded numpy
+        # object comparison keeps this correct across both.
+        if not (
+            pd.api.types.is_object_dtype(df[col])
+            or pd.api.types.is_string_dtype(df[col])
+        ):
+            continue
+        cleaned = _try_clean_numeric_column(df[col])
+        if cleaned is not None:
+            df[col] = cleaned
+            numeric_cols_cleaned.append(col)
+
+    warnings.extend(validate_dataframe(df))
 
     # profile columns for the catalog
     columns_info = []
     for col in df.columns:
         series = df[col]
-        role = _infer_role(col, series)
+        role = _infer_role(col, series, is_parsed_date=col in date_cols_converted)
         sample_vals = series.dropna().unique()[:5].tolist()
         columns_info.append({
             "name": col,
@@ -114,6 +337,9 @@ def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str)
         "columns": columns_info,
         "source_filename": filename,
         "date_columns_parsed": date_cols_converted,
+        "numeric_columns_cleaned": numeric_cols_cleaned,
+        "header_rows_skipped": header_row,
+        "blank_rows_dropped": blank_rows_dropped,
     }
     catalog.register_table(dataset_id, table_name, table_info)
 

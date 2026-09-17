@@ -5,68 +5,82 @@ import VegaChart from './VegaChart';
 import EvidenceChip from './EvidenceChip';
 
 /**
- * Picks a sensible default (metric, date) pair from the catalog instead
- * of leaving both selects empty -- prefers a metric and date column
- * that live in the SAME table, since that's what the backend can
- * actually resolve into one query. Falls back to the first metric/date
- * found anywhere if no single table has both.
+ * Picks a sensible default (metric, date) pair within a single table --
+ * deliberately never pools columns across tables, since two unrelated
+ * uploaded tables routinely share a column name (e.g. two files both
+ * having "revenue"/"order_date"), and there's no way to tell which
+ * table the person meant once the names are merged into one list.
  */
-function pickDefaults(catalog) {
-  const tables = catalog ? Object.values(catalog.tables || {}) : [];
-  for (const t of tables) {
-    const metric = (t.columns || []).find((c) => c.inferred_role === 'metric');
-    const date = (t.columns || []).find((c) => c.inferred_role === 'date');
-    if (metric && date) return { metricCol: metric.name, dateCol: date.name };
-  }
-  const allCols = tables.flatMap((t) => t.columns || []);
-  const metric = allCols.find((c) => c.inferred_role === 'metric');
-  const date = allCols.find((c) => c.inferred_role === 'date');
+function pickDefaults(table) {
+  const cols = table?.columns || [];
+  const metric = cols.find((c) => c.inferred_role === 'metric');
+  const date = cols.find((c) => c.inferred_role === 'date');
   return { metricCol: metric?.name || '', dateCol: date?.name || '' };
 }
 
 export default function ForecastPanel({ datasetId, catalog }) {
+  const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
+  const [tableName, setTableName] = useState(tableNames[0] || '');
   const [metricCol, setMetricCol] = useState('');
   const [dateCol, setDateCol] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const columns = catalog ? Object.values(catalog.tables || {}).flatMap((t) => t.columns) : [];
+  useEffect(() => {
+    if (tableNames.length && !tableNames.includes(tableName)) {
+      setTableName(tableNames[0]);
+    }
+  }, [tableNames.join(','), tableName]);
+
+  const columns = catalog?.tables?.[tableName]?.columns || [];
   const metricOptions = columns.filter((c) => c.inferred_role === 'metric');
   const dateOptions = columns.filter((c) => c.inferred_role === 'date');
 
-  const runForecast = useCallback((metric, date) => {
-    if (!metric || !date || !datasetId) return;
+  const runForecast = useCallback((table, metric, date) => {
+    if (!table || !metric || !date || !datasetId) return;
     setLoading(true);
     setError(null);
-    getForecast(datasetId, metric, date)
+    getForecast(datasetId, metric, date, 3, 'month', table)
       .then(setResult)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [datasetId]);
 
-  // auto-pick defaults and run the moment the catalog is available --
+  // re-pick defaults and re-run whenever the selected table changes --
   // matches the Dashboard/Ask tabs, which never make you configure
   // before seeing anything
   useEffect(() => {
-    if (!catalog) return;
-    const defaults = pickDefaults(catalog);
+    if (!catalog || !tableName) return;
+    const defaults = pickDefaults(catalog.tables?.[tableName]);
+    setMetricCol(defaults.metricCol);
+    setDateCol(defaults.dateCol);
+    setResult(null);
     if (defaults.metricCol && defaults.dateCol) {
-      setMetricCol(defaults.metricCol);
-      setDateCol(defaults.dateCol);
-      runForecast(defaults.metricCol, defaults.dateCol);
+      runForecast(tableName, defaults.metricCol, defaults.dateCol);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, datasetId]);
+  }, [catalog, tableName]);
 
   function handleForecast(e) {
     e.preventDefault();
-    runForecast(metricCol, dateCol);
+    runForecast(tableName, metricCol, dateCol);
   }
 
   return (
     <div>
-      <h2 className="font-display text-2xl text-ink mb-4">Forecast</h2>
+      <div className="flex items-baseline justify-between mb-4 flex-wrap gap-2">
+        <h2 className="font-display text-2xl text-ink">Forecast</h2>
+        {tableNames.length > 1 && (
+          <select
+            value={tableName}
+            onChange={(e) => setTableName(e.target.value)}
+            className="figure bg-white border border-line rounded-sm px-2 py-1.5 text-xs outline-none focus:border-ledger-blue"
+          >
+            {tableNames.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
+      </div>
 
       <form onSubmit={handleForecast} className="flex gap-2 mb-6 flex-wrap items-center">
         <select value={metricCol} onChange={(e) => setMetricCol(e.target.value)} className="figure bg-white border border-line rounded-sm px-2.5 py-2 text-sm outline-none focus:border-ledger-blue">
@@ -81,7 +95,7 @@ export default function ForecastPanel({ datasetId, catalog }) {
           {loading ? <Loader2 size={14} className="animate-spin" /> : <TrendingUp size={14} />}
           Project forward
         </button>
-        <span className="text-xs text-muted">Auto-picked on load — change either dropdown to forecast something else</span>
+        <span className="text-xs text-muted">Auto-picked on load — change either dropdown, or the table, to forecast something else</span>
       </form>
 
       {error && <p className="text-sm text-decline mb-4">{error}</p>}

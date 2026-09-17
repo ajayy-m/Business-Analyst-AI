@@ -1,4 +1,5 @@
 import json
+import math
 import shutil
 import uuid
 from pathlib import Path
@@ -8,13 +9,52 @@ load_dotenv()  # must run before `app.agent` is imported so GROQ_API_KEY is set
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import groq
 
 from app.data import ingestion, catalog
 from app.analytics import sql_safety, diagnostics, forecasting, anomaly_dashboard, churn, dashboard_composer
 from app import agent, visualization
 
-app = FastAPI(title="AI Business Analyst API", version="0.1.0-phase1")
+
+def _json_safe(value):
+    """Recursively replace NaN/Infinity floats with None.
+
+    Real-world data (missing values in a metric column, a category with
+    no rows in some period, etc.) routinely produces NaN when aggregated
+    by pandas/DuckDB. That NaN survives all the way into a chart's
+    `data.values` list -- and Starlette's default JSONResponse calls
+    `json.dumps(..., allow_nan=False)`, which raises a ValueError the
+    moment it hits one, turning an otherwise-fine (if gappy) chart into
+    a raw 500 for the whole endpoint. None/null is both JSON-legal and
+    the semantically correct value here: Vega-Lite renders a null data
+    point as a gap in the line/bar rather than pretending the value is
+    zero, which is the honest way to show a genuine gap in the data."""
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_json_safe(v) for v in value)
+    return value
+
+
+class SafeJSONResponse(JSONResponse):
+    """Drop-in replacement for FastAPI's default JSON response that
+    sanitizes NaN/Infinity before encoding, instead of letting the
+    whole response 500 on data that's honestly just incomplete."""
+
+    def render(self, content) -> bytes:
+        return super().render(_json_safe(content))
+
+
+app = FastAPI(
+    title="AI Business Analyst API",
+    version="0.1.0-phase1",
+    default_response_class=SafeJSONResponse,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -300,6 +340,7 @@ def forecast(
     date_column: str = Form(...),
     periods_ahead: int = Form(3),
     granularity: str = Form("month"),
+    table_name: str | None = Form(None),
 ):
     """
     Projects a metric forward using a linear trend fit to historical
@@ -307,6 +348,14 @@ def forecast(
     Purely statistical -- no LLM involved. Low r_squared in the response
     means the trend explains little of the variance; treat the forecast
     with proportional skepticism in that case.
+
+    `table_name` should be sent whenever the frontend already knows
+    which table's dropdown these columns came from (which is always,
+    now that ForecastPanel has a per-table selector) -- without it,
+    column names that happen to repeat across two uploaded tables (e.g.
+    two files both having "revenue"/"order_date") silently resolve to
+    whichever table was uploaded first, which can forecast the wrong
+    dataset entirely. Left optional only for backward compatibility.
     """
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
@@ -319,6 +368,7 @@ def forecast(
             date_column=date_column,
             periods_ahead=periods_ahead,
             granularity=granularity,
+            table_name=table_name,
         )
     except forecasting.ForecastError as e:
         raise HTTPException(400, str(e))
@@ -396,6 +446,7 @@ def churn_risk(
     metric_column: str = Form(...),
     date_column: str = Form(...),
     top_n: int = Form(20),
+    table_name: str | None = Form(None),
 ):
     """
     Trains a logistic regression to predict which customers are likely
@@ -409,6 +460,10 @@ def churn_risk(
     forecasting and anomaly detection are statistical, not fit/predict
     ML. Needs at least 3 time periods of data to have both a training
     window and a held-out evaluation window.
+
+    See the identical `table_name` note on /forecast -- same reason:
+    without it, name-collision across uploaded tables can silently
+    train the model on the wrong dataset.
     """
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
@@ -421,6 +476,7 @@ def churn_risk(
             metric_column=metric_column,
             date_column=date_column,
             top_n=top_n,
+            table_name=table_name,
         )
     except churn.ChurnError as e:
         raise HTTPException(400, str(e))
