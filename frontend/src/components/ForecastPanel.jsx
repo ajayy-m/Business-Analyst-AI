@@ -18,20 +18,14 @@ function pickDefaults(table) {
   return { metricCol: metric?.name || '', dateCol: date?.name || '' };
 }
 
-export default function ForecastPanel({ datasetId, catalog }) {
+export default function ForecastPanel({ datasetId, catalog, selectedTable, onSelectTable }) {
   const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
-  const [tableName, setTableName] = useState(tableNames[0] || '');
+  const tableName = selectedTable;
   const [metricCol, setMetricCol] = useState('');
   const [dateCol, setDateCol] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
-  useEffect(() => {
-    if (tableNames.length && !tableNames.includes(tableName)) {
-      setTableName(tableNames[0]);
-    }
-  }, [tableNames.join(','), tableName]);
 
   const columns = catalog?.tables?.[tableName]?.columns || [];
   const metricOptions = columns.filter((c) => c.inferred_role === 'metric');
@@ -41,7 +35,7 @@ export default function ForecastPanel({ datasetId, catalog }) {
     if (!table || !metric || !date || !datasetId) return;
     setLoading(true);
     setError(null);
-    getForecast(datasetId, metric, date, 3, 'month', table)
+    getForecast(datasetId, metric, date, 3, null, table)
       .then(setResult)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -73,8 +67,8 @@ export default function ForecastPanel({ datasetId, catalog }) {
         <h2 className="font-display text-2xl text-ink">Forecast</h2>
         {tableNames.length > 1 && (
           <select
-            value={tableName}
-            onChange={(e) => setTableName(e.target.value)}
+            value={tableName || ''}
+            onChange={(e) => onSelectTable(e.target.value)}
             className="figure bg-white border border-line rounded-sm px-2 py-1.5 text-xs outline-none focus:border-ledger-blue"
           >
             {tableNames.map((t) => <option key={t} value={t}>{t}</option>)}

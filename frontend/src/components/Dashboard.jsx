@@ -3,6 +3,7 @@ import { TrendingUp, TrendingDown, Loader2, X } from 'lucide-react';
 import { getDashboard } from '../api';
 import { humanize } from '../utils';
 import VegaChart from './VegaChart';
+import DataQualityPanel from './DataQualityPanel';
 
 function KpiCard({ kpi }) {
   const up = kpi.trend === 'up';
@@ -87,21 +88,15 @@ function FilterBar({ filterMeta, activeFilters, onChange, dateFrom, dateTo, onDa
  * -- this component lays out whatever it's given, plus the filter bar
  * that drives which slice of the data that composition runs against.
  */
-export default function Dashboard({ datasetId, catalog }) {
+export default function Dashboard({ datasetId, catalog, selectedTable, onSelectTable }) {
   const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
-  const [tableName, setTableName] = useState(tableNames[0] || '');
+  const tableName = selectedTable;
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [activeFilters, setActiveFilters] = useState({});
   const [dateFrom, setDateFrom] = useState(null);
   const [dateTo, setDateTo] = useState(null);
-
-  useEffect(() => {
-    if (tableNames.length && !tableNames.includes(tableName)) {
-      setTableName(tableNames[0]);
-    }
-  }, [tableNames.join(','), tableName]);
 
   // switching tables should reset filters -- they belong to the old table's columns
   useEffect(() => {
@@ -148,8 +143,8 @@ export default function Dashboard({ datasetId, catalog }) {
         <div className="flex items-center gap-2">
           {tableNames.length > 1 && (
             <select
-              value={tableName}
-              onChange={(e) => setTableName(e.target.value)}
+              value={tableName || ''}
+              onChange={(e) => onSelectTable(e.target.value)}
               className="figure bg-white border border-line rounded-sm px-2 py-1.5 text-xs outline-none focus:border-ledger-blue"
             >
               {tableNames.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -158,6 +153,8 @@ export default function Dashboard({ datasetId, catalog }) {
           <p className="text-xs text-muted">Auto-generated · every number computed, none guessed</p>
         </div>
       </div>
+
+      <DataQualityPanel dq={catalog?.tables?.[tableName]?.data_quality} />
 
       {dashboard?.filters && (dashboard.filters.categorical?.length > 0 || dashboard.filters.date) && (
         <FilterBar

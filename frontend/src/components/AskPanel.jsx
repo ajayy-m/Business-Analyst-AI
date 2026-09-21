@@ -59,7 +59,9 @@ function buildExampleQuestions(catalog) {
   return examples.slice(0, 4);
 }
 
-export default function AskPanel({ datasetId, catalog }) {
+export default function AskPanel({ datasetId, catalog, selectedTable, onSelectTable }) {
+  const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
+  const tableName = selectedTable;
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState(null);
   const [drillFilters, setDrillFilters] = useState({});
@@ -72,15 +74,24 @@ export default function AskPanel({ datasetId, catalog }) {
     if (datasetId) setHistory(loadHistory(datasetId));
   }, [datasetId]);
 
-  const examples = buildExampleQuestions(catalog);
+  // clear the previous answer when the selected table changes -- an
+  // answer (and especially its underlying SQL/findings) belongs to
+  // whichever table it was actually run against
+  useEffect(() => {
+    setResult(null);
+    setDrillFilters({});
+    setError(null);
+  }, [tableName]);
+
+  const examples = buildExampleQuestions(catalog?.tables?.[tableName] ? { tables: { [tableName]: catalog.tables[tableName] } } : null);
 
   async function runQuestion(q) {
-    if (!q.trim() || !datasetId) return;
+    if (!q.trim() || !datasetId || !tableName) return;
     setLoading(true);
     setError(null);
     setDrillFilters({});
     try {
-      const data = await askQuestion(datasetId, q);
+      const data = await askQuestion(datasetId, q, tableName);
       setResult(data);
       setHistory(saveToHistory(datasetId, q));
     } catch (err) {
@@ -115,7 +126,8 @@ export default function AskPanel({ datasetId, catalog }) {
         datasetId,
         result.metric_column,
         result.date_column,
-        newFilters
+        newFilters,
+        tableName
       );
       setResult((prev) => ({ ...prev, findings: data.findings, charts: data.charts }));
       setDrillFilters(newFilters);
@@ -135,7 +147,18 @@ export default function AskPanel({ datasetId, catalog }) {
 
   return (
     <div>
-      <h2 className="font-display text-2xl text-ink mb-4">Ask</h2>
+      <div className="flex items-baseline justify-between mb-4 flex-wrap gap-2">
+        <h2 className="font-display text-2xl text-ink">Ask</h2>
+        {tableNames.length > 1 && (
+          <select
+            value={tableName || ''}
+            onChange={(e) => onSelectTable(e.target.value)}
+            className="figure bg-white border border-line rounded-sm px-2 py-1.5 text-xs outline-none focus:border-ledger-blue"
+          >
+            {tableNames.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
+      </div>
 
       <form onSubmit={handleAsk} className="flex gap-2 mb-6">
         <div className="relative flex-1">
@@ -149,7 +172,7 @@ export default function AskPanel({ datasetId, catalog }) {
         </div>
         <button
           type="submit"
-          disabled={loading || !datasetId}
+          disabled={loading || !datasetId || !tableName}
           className="bg-ledger-blue hover:bg-ledger-blue-light text-paper text-sm px-4 py-2.5 rounded-sm disabled:opacity-40 flex items-center gap-2"
         >
           {loading ? <Loader2 size={14} className="animate-spin" /> : null}
@@ -218,8 +241,16 @@ export default function AskPanel({ datasetId, catalog }) {
               )}
               {findings?.level1_driver && (
                 <EvidenceChip
-                  label={`${findings.level1_driver.contribution_pct}% contribution`}
-                  detail={`What this means: how much of the total change this one category alone accounts for. It can go above 100% -- that happens when other categories partially offset it (e.g. this one dropped a lot, but something else grew a little, so this category's drop is more than the whole).\n\n${findings.level1_driver.dimension} = ${findings.level1_driver.value}\nPrevious: ${findings.level1_driver.value_prev.toLocaleString()}\nLatest: ${findings.level1_driver.value_latest.toLocaleString()}`}
+                  label={
+                    findings.level1_driver.contribution_reliable
+                      ? `${findings.level1_driver.contribution_pct}% contribution`
+                      : 'largest mover'
+                  }
+                  detail={
+                    findings.level1_driver.contribution_reliable
+                      ? `What this means: how much of the total change this one category alone accounts for. It can go above 100% -- that happens when other categories partially offset it (e.g. this one dropped a lot, but something else grew a little, so this category's drop is more than the whole).\n\n${findings.level1_driver.dimension} = ${findings.level1_driver.value}\nPrevious: ${findings.level1_driver.value_prev.toLocaleString()}\nLatest: ${findings.level1_driver.value_latest.toLocaleString()}`
+                      : `The overall total barely changed (${result.answer.includes('%') ? 'well under 1%' : 'a tiny net change'}), so "percent of the total change" isn't a meaningful way to rank categories here -- dividing by a number that's essentially zero would produce a nonsense percentage. Showing the category that moved the most in absolute terms instead.\n\n${findings.level1_driver.dimension} = ${findings.level1_driver.value}\nPrevious: ${findings.level1_driver.value_prev.toLocaleString()}\nLatest: ${findings.level1_driver.value_latest.toLocaleString()}\nChange: ${findings.level1_driver.delta.toLocaleString()}`
+                  }
                 />
               )}
             </p>

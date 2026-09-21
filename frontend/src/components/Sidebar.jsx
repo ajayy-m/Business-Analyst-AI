@@ -4,15 +4,22 @@ import { uploadFile } from '../api';
 import { humanize, uniqueTableName } from '../utils';
 
 /**
- * No dataset field, no table-name field. The person just drops one or
- * more files onto the zone; each one is auto-named from its filename
- * and uploaded immediately. `datasetId` is still passed in as a prop
- * (it's the hidden workspace ID from getWorkspaceId()), but there's
- * nothing in this component for the person to read or type about it.
+ * No dataset field, no table-name field for uploads -- the person just
+ * drops one or more files onto the zone; each one is auto-named from
+ * its filename and uploaded immediately. `datasetId` is still passed
+ * in as a prop (it's the hidden workspace ID from getWorkspaceId()),
+ * but there's nothing in the upload UI for the person to read or type
+ * about it.
+ *
+ * The list below IS a selector, though: clicking an uploaded table
+ * sets it as the one shared `selectedTable` every tab reads from, so
+ * the person's choice actually persists across Dashboard/Ask/Forecast/
+ * At-risk instead of each tab quietly defaulting back to whichever
+ * table was uploaded first.
  */
-export default function Sidebar({ datasetId, onUploaded, catalog }) {
+export default function Sidebar({ datasetId, onUploaded, catalog, selectedTable, onSelectTable }) {
   const [dragActive, setDragActive] = useState(false);
-  // status per filename while a batch is in flight: 'uploading' | 'done' | 'error'
+  // status per filename while a batch is in flight: 'uploading' | 'done' | { error: message }
   const [uploadStatus, setUploadStatus] = useState({});
 
   const existingTableNames = catalog ? Object.keys(catalog.tables || {}) : [];
@@ -46,7 +53,11 @@ export default function Sidebar({ datasetId, onUploaded, catalog }) {
           setUploadStatus((s) => ({ ...s, [file.name]: 'done' }));
           onUploaded();
         } catch (err) {
-          setUploadStatus((s) => ({ ...s, [file.name]: 'error' }));
+          // Surface the REAL reason, not a generic "couldn't process" --
+          // the backend already returns a specific message (unreadable
+          // file, no rows found, unsupported format, etc.) via its
+          // error `detail`, which this used to silently discard.
+          setUploadStatus((s) => ({ ...s, [file.name]: { error: err.message || 'Unknown error' } }));
         }
       }
     },
@@ -104,10 +115,11 @@ export default function Sidebar({ datasetId, onUploaded, catalog }) {
           </p>
         )}
         {Object.entries(uploadStatus)
-          .filter(([, s]) => s === 'error')
-          .map(([name]) => (
-            <p key={name} className="text-[11px] text-decline mt-1.5 flex items-center gap-1.5">
-              <XCircle size={11} /> Couldn't process {name}
+          .filter(([, s]) => typeof s === 'object' && s?.error)
+          .map(([name, s]) => (
+            <p key={name} className="text-[11px] text-decline mt-1.5 flex items-start gap-1.5">
+              <XCircle size={11} className="shrink-0 mt-0.5" />
+              <span><span className="font-medium">{name}:</span> {s.error}</span>
             </p>
           ))}
       </div>
@@ -120,15 +132,28 @@ export default function Sidebar({ datasetId, onUploaded, catalog }) {
           <p className="text-xs text-paper/40">Nothing uploaded yet — drop a file above to get started.</p>
         )}
         <ul className="space-y-1.5">
-          {tables.map((t) => (
-            <li key={t} className="text-xs text-paper/80 bg-ink-light/60 rounded-sm px-2 py-1.5 flex items-center justify-between gap-2">
-              <span className="truncate">{humanize(t)}</span>
-              <span className="figure text-paper/40 shrink-0 flex items-center gap-1">
-                {uploadStatus[t] !== 'error' && <CheckCircle2 size={11} className="text-gain" />}
-                {catalog.tables[t].row_count.toLocaleString()} rows
-              </span>
-            </li>
-          ))}
+          {tables.map((t) => {
+            const isSelected = t === selectedTable;
+            const hasError = typeof uploadStatus[t] === 'object' && uploadStatus[t]?.error;
+            return (
+              <li key={t}>
+                <button
+                  onClick={() => onSelectTable?.(t)}
+                  className={`w-full text-left text-xs rounded-sm px-2 py-1.5 flex items-center justify-between gap-2 transition-colors ${
+                    isSelected
+                      ? 'bg-ledger-blue text-paper'
+                      : 'text-paper/80 bg-ink-light/60 hover:bg-ink-light'
+                  }`}
+                >
+                  <span className="truncate">{humanize(t)}</span>
+                  <span className={`figure shrink-0 flex items-center gap-1 ${isSelected ? 'text-paper/80' : 'text-paper/40'}`}>
+                    {!hasError && <CheckCircle2 size={11} className="text-gain" />}
+                    {catalog.tables[t].row_count.toLocaleString()} rows
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
     </aside>

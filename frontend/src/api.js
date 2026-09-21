@@ -35,8 +35,9 @@ export async function getCatalog(datasetId) {
   return handle(res);
 }
 
-export async function askQuestion(datasetId, question) {
+export async function askQuestion(datasetId, question, tableName = null) {
   const form = new URLSearchParams({ question });
+  if (tableName) form.set('table_name', tableName);
   const res = await fetch(`${BASE}/datasets/${datasetId}/ask`, {
     method: 'POST',
     body: form,
@@ -44,12 +45,13 @@ export async function askQuestion(datasetId, question) {
   return handle(res);
 }
 
-export async function diagnoseDirect(datasetId, metricColumn, dateColumn, filters) {
+export async function diagnoseDirect(datasetId, metricColumn, dateColumn, filters, tableName = null) {
   const form = new URLSearchParams({
     metric_column: metricColumn,
     date_column: dateColumn,
     filters_json: JSON.stringify(filters || {}),
   });
+  if (tableName) form.set('table_name', tableName);
   const res = await fetch(`${BASE}/datasets/${datasetId}/diagnose`, {
     method: 'POST',
     body: form,
@@ -73,13 +75,13 @@ export async function getDashboard(datasetId, tableName, opts = {}) {
   return handle(res);
 }
 
-export async function getForecast(datasetId, metricColumn, dateColumn, periodsAhead = 3, granularity = 'month', tableName = null) {
+export async function getForecast(datasetId, metricColumn, dateColumn, periodsAhead = 3, granularity = null, tableName = null) {
   const form = new URLSearchParams({
     metric_column: metricColumn,
     date_column: dateColumn,
     periods_ahead: periodsAhead,
-    granularity,
   });
+  if (granularity) form.set('granularity', granularity);
   if (tableName) form.set('table_name', tableName);
   const res = await fetch(`${BASE}/datasets/${datasetId}/forecast`, {
     method: 'POST',

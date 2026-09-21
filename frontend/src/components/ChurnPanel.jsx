@@ -19,9 +19,9 @@ function pickDefaults(table) {
   return { idCol: '', metricCol: '', dateCol: '' };
 }
 
-export default function ChurnPanel({ datasetId, catalog }) {
+export default function ChurnPanel({ datasetId, catalog, selectedTable, onSelectTable }) {
   const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
-  const [tableName, setTableName] = useState(tableNames[0] || '');
+  const tableName = selectedTable;
   const [idCol, setIdCol] = useState('');
   const [metricCol, setMetricCol] = useState('');
   const [dateCol, setDateCol] = useState('');
@@ -29,12 +29,6 @@ export default function ChurnPanel({ datasetId, catalog }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [autoAttempted, setAutoAttempted] = useState(false);
-
-  useEffect(() => {
-    if (tableNames.length && !tableNames.includes(tableName)) {
-      setTableName(tableNames[0]);
-    }
-  }, [tableNames.join(','), tableName]);
 
   const columns = catalog?.tables?.[tableName]?.columns || [];
   const idOptions = columns.filter((c) => c.inferred_role === 'id');
@@ -82,8 +76,8 @@ export default function ChurnPanel({ datasetId, catalog }) {
         <h2 className="font-display text-2xl text-ink">At-risk customers</h2>
         {tableNames.length > 1 && (
           <select
-            value={tableName}
-            onChange={(e) => setTableName(e.target.value)}
+            value={tableName || ''}
+            onChange={(e) => onSelectTable(e.target.value)}
             className="figure bg-white border border-line rounded-sm px-2 py-1.5 text-xs outline-none focus:border-ledger-blue"
           >
             {tableNames.map((t) => <option key={t} value={t}>{t}</option>)}
