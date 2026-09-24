@@ -184,10 +184,18 @@ def compose_dashboard(
                     "max": str(bounds["hi"].iloc[0])[:10],
                 }
 
+        # detect once, reuse for every metric/breakdown below -- this
+        # used to be hardcoded to "quarter" unconditionally, which
+        # mislabeled (and mis-aggregated) any data whose real
+        # granularity wasn't quarterly. Found on a real upload: an
+        # annual financial statement (one row per year) was truncated
+        # and titled "by quarter". See catalog.detect_date_granularity.
+        trunc = catalog.detect_date_granularity(con, table_name, date_column) if date_column else "quarter"
+
         for metric in metric_columns:
             if date_column:
                 df = con.execute(f"""
-                    SELECT date_trunc('quarter', "{date_column}") AS period, sum("{metric}") AS value
+                    SELECT date_trunc('{trunc}', "{date_column}") AS period, sum("{metric}") AS value
                     FROM "{table_name}" {where_sql} GROUP BY 1 ORDER BY 1
                 """, where_params).fetchdf()
                 period_series = [
@@ -219,7 +227,7 @@ def compose_dashboard(
                             "kind": "trend",
                             "metric": metric,
                             "dimension": None,
-                            "spec": visualization.build_trend_chart(period_series, metric),
+                            "spec": visualization.build_trend_chart(period_series, metric, granularity=trunc),
                         },
                     ))
 
@@ -239,7 +247,7 @@ def compose_dashboard(
                 score = 0.3
                 if date_column:
                     df_dim = con.execute(f"""
-                        SELECT "{dim}" AS category, date_trunc('quarter', "{date_column}") AS period,
+                        SELECT "{dim}" AS category, date_trunc('{trunc}', "{date_column}") AS period,
                                sum("{metric}") AS value
                         FROM "{table_name}" {where_sql} GROUP BY 1, 2 ORDER BY 1, 2
                     """, where_params).fetchdf()

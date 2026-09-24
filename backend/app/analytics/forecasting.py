@@ -28,15 +28,13 @@ def forecast_metric(
     date_column: str,
     filters: dict | None = None,
     periods_ahead: int = 3,
-    granularity: str = "month",
+    granularity: str | None = None,
     table_name: str | None = None,
 ) -> dict:
     filters = filters or {}
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
         raise ForecastError("Dataset not found.")
-
-    trunc = _period_trunc_sql(granularity)
 
     con = catalog.get_connection(dataset_id)
     try:
@@ -69,6 +67,18 @@ def forecast_metric(
         for f in filters:
             if f not in col_names:
                 raise ForecastError(f"Filter column '{f}' not found in schema.")
+
+        # Auto-detect from the date column's actual span when the caller
+        # doesn't force a specific one -- the frontend used to always
+        # send "month" unconditionally, which projected annual data
+        # (e.g. a financial statement, one row/year) forward in monthly
+        # steps: visually, 3 forecast points bunched a few months after
+        # the last *annual* data point instead of a sensible few years
+        # out. Same underlying fix as catalog.detect_date_granularity,
+        # already applied to Dashboard and Ask's diagnostic charts.
+        if granularity is None:
+            granularity = catalog.detect_date_granularity(con, table_name, date_column)
+        trunc = _period_trunc_sql(granularity)
 
         where_clauses = [f'"{col}" = ?' for col in filters]
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""

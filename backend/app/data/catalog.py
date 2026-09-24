@@ -6,11 +6,50 @@ instead of raw data -- schema-grounded prompting instead of dumping rows.
 import json
 import os
 import duckdb
+import pandas as pd
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 CATALOG_FILE = DATA_DIR / "catalog.json"
+
+
+def detect_date_granularity(con, table_name: str, date_column: str) -> str:
+    """
+    Picks a chart/aggregation granularity for a date column from its
+    actual date RANGE (min to max), not its raw timestamp spacing.
+    Raw spacing would make day-level transactional data (a sale almost
+    every day) detect as "day" granularity and produce an absurdly
+    noisy chart with hundreds of points; bucketing by the overall span
+    instead targets a sensible number of points regardless of how many
+    individual rows exist within it.
+
+    This replaces a granularity that used to be hardcoded to "quarter"
+    everywhere a trend was built (Dashboard, Ask's diagnostic
+    drill-down) -- which silently mislabeled annual data as quarterly
+    (found on a real financial-statement upload: one row per year,
+    truncated and titled "by quarter").
+
+    Returns one of "day", "week", "month", "quarter", "year".
+    """
+    bounds = con.execute(
+        f'SELECT min("{date_column}") AS lo, max("{date_column}") AS hi FROM "{table_name}"'
+    ).fetchdf()
+    if bounds.empty or pd.isna(bounds.iloc[0]["lo"]) or pd.isna(bounds.iloc[0]["hi"]):
+        return "month"  # no data to measure a span from; a reasonable default
+
+    lo, hi = bounds.iloc[0]["lo"], bounds.iloc[0]["hi"]
+    span_days = (hi - lo).days
+
+    if span_days < 14:
+        return "day"
+    if span_days < 90:
+        return "week"
+    if span_days < 730:
+        return "month"
+    if span_days < 365 * 8:
+        return "quarter"
+    return "year"
 
 
 def _db_path(dataset_id: str) -> str:
@@ -68,19 +107,34 @@ def get_column_names(dataset_id: str, table_name: str) -> list[str]:
     return [c["name"] for c in info["columns"]]
 
 
-def catalog_as_llm_context(dataset_id: str) -> str:
+def catalog_as_llm_context(dataset_id: str, table_name: str | None = None) -> str:
     """
     Renders the schema catalog as compact text for LLM grounding.
     This is what gets fed to the agent instead of raw data --
     keeps prompts small and avoids leaking full datasets into context.
+
+    `table_name` restricts this to one table. Always pass it when the
+    person has a specific dataset selected (which is now always, since
+    the frontend has a single shared dataset selector): pooling every
+    uploaded table's schema together, as this function used to do
+    unconditionally, is precisely what let the LLM write SQL against
+    the wrong table whenever two unrelated uploads happened to share a
+    column name like "revenue" or "customer_id" -- there's no way for
+    it to know which one you meant if it can see both.
     """
     ds = get_dataset_catalog(dataset_id)
     if not ds:
         return "No tables found for this dataset."
 
+    tables = ds["tables"]
+    if table_name is not None:
+        if table_name not in tables:
+            return f"Table '{table_name}' not found."
+        tables = {table_name: tables[table_name]}
+
     lines = []
-    for table_name, info in ds["tables"].items():
-        lines.append(f"TABLE: {table_name} ({info['row_count']} rows)")
+    for tname, info in tables.items():
+        lines.append(f"TABLE: {tname} ({info['row_count']} rows)")
         for col in info["columns"]:
             role = f", role={col['inferred_role']}" if col.get("inferred_role") else ""
             lines.append(

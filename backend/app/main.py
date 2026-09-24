@@ -198,7 +198,7 @@ def ask_question_simple(dataset_id: str, question: str = Form(...)):
 
 
 @app.post("/datasets/{dataset_id}/ask")
-def ask_question(dataset_id: str, question: str = Form(...)):
+def ask_question(dataset_id: str, question: str = Form(...), table_name: str | None = Form(None)):
     """
     Phase 3: classifies the question, then routes to one of two paths:
 
@@ -210,12 +210,21 @@ def ask_question(dataset_id: str, question: str = Form(...)):
       findings; it never does the arithmetic.
     - 'lookup' (direct factual questions): falls back to the single-query
       path from Phase 2.
+
+    `table_name` should always be sent now that the frontend has one
+    shared dataset selector -- without it, the LLM sees every uploaded
+    table's schema pooled together and has no way to know which table
+    "revenue" or "customer_id" was supposed to mean when more than one
+    upload happens to use that name, which was silently answering
+    questions against the wrong dataset. Left optional only so a
+    missing/stale frontend build still gets an answer rather than a
+    hard error.
     """
     ds = catalog.get_dataset_catalog(dataset_id)
     if not ds:
         raise HTTPException(404, "Dataset not found.")
 
-    schema_context = catalog.catalog_as_llm_context(dataset_id)
+    schema_context = catalog.catalog_as_llm_context(dataset_id, table_name=table_name)
 
     try:
         try:
@@ -253,6 +262,7 @@ def ask_question(dataset_id: str, question: str = Form(...)):
                     metric_column=metric_column,
                     date_column=date_column,
                     filters=params.get("filters") or {},
+                    table_name=table_name,
                 )
             except diagnostics.DiagnosticError as e:
                 raise HTTPException(400, f"Could not run diagnostic: {e}")
@@ -261,7 +271,8 @@ def ask_question(dataset_id: str, question: str = Form(...)):
 
             charts = {
                 "trend": visualization.build_trend_chart(
-                    findings["overall"]["period_series"], metric_column
+                    findings["overall"]["period_series"], metric_column,
+                    granularity=findings["granularity"],
                 ),
                 "driver_breakdown": visualization.build_driver_bar_chart(
                     findings["level1_driver"], findings["level2_driver"], metric_column
@@ -339,7 +350,7 @@ def forecast(
     metric_column: str = Form(...),
     date_column: str = Form(...),
     periods_ahead: int = Form(3),
-    granularity: str = Form("month"),
+    granularity: str | None = Form(None),
     table_name: str | None = Form(None),
 ):
     """
@@ -348,6 +359,13 @@ def forecast(
     Purely statistical -- no LLM involved. Low r_squared in the response
     means the trend explains little of the variance; treat the forecast
     with proportional skepticism in that case.
+
+    `granularity` is auto-detected from the date column's actual span
+    (see catalog.detect_date_granularity) when omitted -- this used to
+    default to "month" unconditionally, which projected annual data
+    (e.g. one row per year in a financial statement) forward in monthly
+    steps instead of yearly ones. Only pass it explicitly to override
+    the detected value.
 
     `table_name` should be sent whenever the frontend already knows
     which table's dropdown these columns came from (which is always,
@@ -490,6 +508,7 @@ def diagnose_direct(
     metric_column: str = Form(...),
     date_column: str = Form(...),
     filters_json: str = Form("{}"),
+    table_name: str | None = Form(None),
 ):
     """
     Same deterministic drill-down as the diagnostic path of /ask, but
@@ -516,12 +535,16 @@ def diagnose_direct(
             metric_column=metric_column,
             date_column=date_column,
             filters=filters,
+            table_name=table_name,
         )
     except diagnostics.DiagnosticError as e:
         raise HTTPException(400, str(e))
 
     charts = {
-        "trend": visualization.build_trend_chart(findings["overall"]["period_series"], metric_column),
+        "trend": visualization.build_trend_chart(
+            findings["overall"]["period_series"], metric_column,
+            granularity=findings["granularity"],
+        ),
         "driver_breakdown": visualization.build_driver_bar_chart(
             findings["level1_driver"], findings["level2_driver"], metric_column
         ),

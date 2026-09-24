@@ -251,18 +251,28 @@ up the result of a root-cause investigation for a stakeholder.
 You will be given a JSON object with:
 - overall: the metric's value in the latest vs previous period, and pct_change
 - level1_driver: the single category (e.g. a product or region) that
-  explains the largest share of that change, with its own contribution_pct
+  explains the largest share of that change. It has a
+  contribution_reliable flag: when true, use its contribution_pct (how
+  much of the total change this category explains, can exceed 100% when
+  other categories partially offset it). When contribution_reliable is
+  false, contribution_pct is null -- do NOT state a percentage or invent
+  one; the overall total barely moved, so "percent of the total change"
+  isn't a meaningful figure here. Instead describe level1_driver as the
+  category that moved the most in absolute dollar terms, using its delta.
 - level2_driver: optionally, a further breakdown within level1_driver
-  (e.g. a specific region within the product that drove the change)
+  (e.g. a specific region within the product that drove the change),
+  with the same contribution_reliable/contribution_pct/delta rule
 - anomaly: a z_score and is_notable flag indicating whether this deviation
   is statistically unusual or within normal noise
 
 Write a concise summary (3-5 sentences) in this shape, using ONLY the
 numbers provided -- never invent or recompute a number:
 1. State the overall change with its pct_change, formatted as a percentage.
-2. Name the level1_driver and its contribution_pct as the primary cause.
+2. Name the level1_driver as the primary factor. If contribution_reliable
+   is true, cite its contribution_pct. If false, cite its dollar delta
+   instead and do not mention a percentage for it.
 3. If level2_driver is present, name it as a further concentration within
-   the level1 finding.
+   the level1 finding, following the same contribution_reliable rule.
 4. If anomaly.is_notable is true, note that this is a statistically
    significant deviation, not normal variation. If is_notable is false or
    null, don't claim significance.

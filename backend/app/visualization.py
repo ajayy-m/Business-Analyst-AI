@@ -12,25 +12,42 @@ needing to draw pixels.
 VEGA_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json"
 
 
-def build_trend_chart(period_series: list, metric_label: str) -> dict:
-    """Line chart of a metric over time -- the 'overall' picture."""
+GRANULARITY_LABELS = {
+    "day": "Day", "week": "Week", "month": "Month", "quarter": "Quarter", "year": "Year",
+}
+GRANULARITY_AXIS_FORMAT = {
+    "day": "%b %d, %Y", "week": "%b %d, %Y", "month": "%b %Y", "quarter": "%b %Y", "year": "%Y",
+}
+
+
+def build_trend_chart(period_series: list, metric_label: str, granularity: str = "quarter") -> dict:
+    """Line chart of a metric over time -- the 'overall' picture.
+
+    `granularity` should always be the value returned by
+    `catalog.detect_date_granularity` for the actual date column being
+    charted, not a fixed assumption -- annual data titled "by quarter"
+    (this function's old hardcoded default) is misleading even when the
+    chart itself renders fine, since it implies a resolution the data
+    doesn't have."""
     period_values = [p["period"] for p in period_series]
+    label = GRANULARITY_LABELS.get(granularity, granularity.capitalize())
+    axis_format = GRANULARITY_AXIS_FORMAT.get(granularity, "%b %Y")
     return {
         "$schema": VEGA_SCHEMA,
-        "title": f"{metric_label} by quarter",
+        "title": f"{metric_label} by {granularity}",
         "data": {"values": period_series},
         "mark": {"type": "line", "point": True},
         "encoding": {
             "x": {
-                "field": "period", "type": "temporal", "title": "Quarter",
+                "field": "period", "type": "temporal", "title": label,
                 # constrain ticks to only the actual data points -- without
                 # this Vega-Lite defaults to a continuous daily scale and
                 # renders dozens of unwanted intermediate tick marks
-                "axis": {"format": "%b %Y", "values": period_values},
+                "axis": {"format": axis_format, "values": period_values},
             },
             "y": {"field": "value", "type": "quantitative", "title": metric_label},
             "tooltip": [
-                {"field": "period", "type": "temporal", "title": "Quarter"},
+                {"field": "period", "type": "temporal", "title": label},
                 {"field": "value", "type": "quantitative", "title": metric_label, "format": ",.0f"},
             ],
         },

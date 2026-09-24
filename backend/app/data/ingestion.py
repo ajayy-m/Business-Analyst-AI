@@ -233,19 +233,26 @@ def _infer_role(col_name: str, series: pd.Series, is_parsed_date: bool = False) 
     return "text"
 
 
-def validate_dataframe(df: pd.DataFrame) -> list[str]:
+def validate_dataframe(df: pd.DataFrame) -> dict:
+    """Computes data-quality signals once, structured -- used both for
+    the plain-English warnings list and the Data Quality Summary panel,
+    so the two can never drift out of sync with each other."""
+    dup_count = int(df.duplicated().sum())
+    high_null_cols = [col for col in df.columns if df[col].isna().mean() > 0.5]
+
     warnings = []
     if df.empty:
         warnings.append("File contains no rows.")
-    dup_count = df.duplicated().sum()
     if dup_count > 0:
         warnings.append(f"{dup_count} fully duplicate rows detected.")
-    high_null_cols = [
-        col for col in df.columns if df[col].isna().mean() > 0.5
-    ]
     if high_null_cols:
         warnings.append(f"Columns over 50% null: {', '.join(high_null_cols)}")
-    return warnings
+
+    return {
+        "warnings": warnings,
+        "duplicate_row_count": dup_count,
+        "high_null_columns": high_null_cols,
+    }
 
 
 def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str) -> dict:
@@ -305,7 +312,8 @@ def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str)
             df[col] = cleaned
             numeric_cols_cleaned.append(col)
 
-    warnings.extend(validate_dataframe(df))
+    dq = validate_dataframe(df)
+    warnings.extend(dq["warnings"])
 
     # profile columns for the catalog
     columns_info = []
@@ -329,6 +337,37 @@ def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str)
     con.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM df_temp')
     con.close()
 
+    total_cells = len(df) * len(df.columns)
+    missing_value_count = sum(c["null_count"] for c in columns_info)
+    missing_cell_pct = (missing_value_count / total_cells) if total_cells else 0.0
+    duplicate_row_pct = (dq["duplicate_row_count"] / len(df)) if len(df) else 0.0
+
+    # A plain, explainable formula -- not a black-box score -- consistent
+    # with this whole app's "every number traceable" principle: start at
+    # 100, subtract for the three concrete problems this panel reports,
+    # each capped so one bad column/table doesn't single-handedly zero
+    # out an otherwise-fine dataset.
+    quality_score = 100.0
+    quality_score -= min(40.0, missing_cell_pct * 100)
+    quality_score -= min(30.0, duplicate_row_pct * 100)
+    quality_score -= 10.0 * len(date_cols_failed)
+    quality_score = round(max(0.0, quality_score))
+
+    data_quality = {
+        "row_count": len(df),
+        "column_count": len(df.columns),
+        "missing_value_count": missing_value_count,
+        "missing_cell_pct": round(missing_cell_pct * 100, 2),
+        "duplicate_row_count": dq["duplicate_row_count"],
+        "invalid_date_columns": date_cols_failed,
+        "high_null_columns": dq["high_null_columns"],
+        "header_rows_skipped": header_row,
+        "blank_rows_dropped": blank_rows_dropped,
+        "numeric_columns_cleaned": numeric_cols_cleaned,
+        "quality_score": quality_score,
+        "warnings": warnings,
+    }
+
     table_info = {
         "dataset_id": dataset_id,
         "table_name": table_name,
@@ -340,6 +379,12 @@ def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str)
         "numeric_columns_cleaned": numeric_cols_cleaned,
         "header_rows_skipped": header_row,
         "blank_rows_dropped": blank_rows_dropped,
+        # Previously computed but never persisted -- only ever returned
+        # once in the upload response and then lost, so a Data Quality
+        # panel would go blank on every visit after the first. Now part
+        # of the saved catalog record, retrievable any time via
+        # GET /datasets/{id}/catalog, same as every other column stat.
+        "data_quality": data_quality,
     }
     catalog.register_table(dataset_id, table_name, table_info)
 

@@ -1,0 +1,14 @@
+Q3 Regional Sales Export - CONFIDENTIAL
+
+Order ID, Customer Name,Country ,Order Date,Revenue,Discount %,Refund Amount,Units
+00123,Acme Corp,USA,2024-01-05,"$1,234.56",10%,(50.00),12
+00124,Beta LLC,U.S.A.,01/06/2024,"$2,000.00",0%,0,5
+00125, Gamma Inc,United States,2024-1-7,$980.75,5%,(20.50),8
+00126,Delta Co,Canada,2024/01/08,"$3,450.10",15%,(100.00),20
+7,Epsilon Ltd,canada,"Jan 9, 2024",$500.00,,0,3
+00128,,UK,2024-01-10,,10%,(15.00),
+00129,Zeta Group,U.K.,2024-01-11,"$1,100.00",8%,0,6
+,,,,,,,
+00130,Eta Partners,United Kingdom,not a date,$750.00,12%,(10.00),4
+00131,Theta Co,USA,2024-01-13,"1,999.99",0%,0,9
+00123,Acme Corp,USA,2024-01-05,"$1,234.56",10%,(50.00),12
