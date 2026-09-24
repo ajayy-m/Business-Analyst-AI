@@ -88,7 +88,7 @@ function FilterBar({ filterMeta, activeFilters, onChange, dateFrom, dateTo, onDa
  * -- this component lays out whatever it's given, plus the filter bar
  * that drives which slice of the data that composition runs against.
  */
-export default function Dashboard({ datasetId, catalog, selectedTable, onSelectTable }) {
+export default function Dashboard({ datasetId, catalog, selectedTable, onSelectTable, onCatalogChange }) {
   const tableNames = catalog ? Object.keys(catalog.tables || {}) : [];
   const tableName = selectedTable;
   const [dashboard, setDashboard] = useState(null);
@@ -105,6 +105,8 @@ export default function Dashboard({ datasetId, catalog, selectedTable, onSelectT
     setDateTo(null);
   }, [tableName]);
 
+  const columnsSig = JSON.stringify((catalog?.tables?.[tableName]?.columns || []).map((c) => [c.name, c.inferred_role]));
+
   const refresh = useCallback(() => {
     if (!datasetId || !tableName) return;
     setLoading(true);
@@ -113,7 +115,7 @@ export default function Dashboard({ datasetId, catalog, selectedTable, onSelectT
       .then(setDashboard)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [datasetId, tableName, activeFilters, dateFrom, dateTo]);
+  }, [datasetId, tableName, activeFilters, dateFrom, dateTo, columnsSig]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -154,7 +156,13 @@ export default function Dashboard({ datasetId, catalog, selectedTable, onSelectT
         </div>
       </div>
 
-      <DataQualityPanel dq={catalog?.tables?.[tableName]?.data_quality} />
+      <DataQualityPanel
+        dq={catalog?.tables?.[tableName]?.data_quality}
+        datasetId={datasetId}
+        tableName={tableName}
+        columns={catalog?.tables?.[tableName]?.columns}
+        onCatalogChange={onCatalogChange}
+      />
 
       {dashboard?.filters && (dashboard.filters.categorical?.length > 0 || dashboard.filters.date) && (
         <FilterBar

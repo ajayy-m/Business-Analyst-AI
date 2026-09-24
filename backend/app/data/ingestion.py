@@ -389,3 +389,174 @@ def ingest_file(dataset_id: str, table_name: str, file_path: str, filename: str)
     catalog.register_table(dataset_id, table_name, table_info)
 
     return {**table_info, "warnings": warnings}
+
+# ---------------------------------------------------------------------------
+# Manual column-role override
+# ---------------------------------------------------------------------------
+
+VALID_ROLES = {"date", "metric", "category", "id", "text"}
+_MIN_PARSE_SUCCESS = 0.8  # same bar ingestion applies to dates and numerics
+
+
+class ColumnOverrideError(Exception):
+    """Raised when a requested role override can't be honored. The message
+    is user-facing and always states the actual measured reason."""
+
+
+def _compute_quality_score(missing_cell_pct: float, duplicate_row_pct: float, invalid_date_cols: int) -> int:
+    """Same formula ingest_file uses (kept in one place for overrides)."""
+    score = 100.0
+    score -= min(40.0, missing_cell_pct * 100)
+    score -= min(30.0, duplicate_row_pct * 100)
+    score -= 10.0 * invalid_date_cols
+    return int(round(max(0.0, score)))
+
+
+def _profile_column(name: str, series: pd.Series, role: str) -> dict:
+    sample_vals = series.dropna().unique()[:5].tolist()
+    return {
+        "name": name,
+        "dtype": str(series.dtype),
+        "inferred_role": role,
+        "null_count": int(series.isna().sum()),
+        "null_pct": round(float(series.isna().mean()) * 100, 2),
+        "distinct_count": int(series.nunique()),
+        "sample_values": [str(v) for v in sample_vals],
+    }
+
+
+def override_column_role(dataset_id: str, table_name: str, column_name: str, new_role: str) -> dict:
+    """Lets the person correct a detected column role.
+
+    NOT a cosmetic relabel: a column forced to role="date" or "metric"
+    is actually re-parsed with the same logic ingestion uses and the
+    DuckDB table is rewritten with the converted dtype -- otherwise
+    downstream date_trunc()/sum() would crash on a VARCHAR column.
+    The conversion is committed only if it clears the same 80% success
+    bar as ingestion; otherwise this raises ColumnOverrideError with the
+    measured rate and changes nothing.
+    """
+    if new_role not in VALID_ROLES:
+        raise ColumnOverrideError(
+            f"Unknown role '{new_role}'. Choose one of: {', '.join(sorted(VALID_ROLES))}."
+        )
+    info = catalog.get_table_info(dataset_id, table_name)
+    if not info:
+        raise ColumnOverrideError(f"Table '{table_name}' not found.")
+    col_meta = next((c for c in info["columns"] if c["name"] == column_name), None)
+    if col_meta is None:
+        raise ColumnOverrideError(f"Column '{column_name}' not found in '{table_name}'.")
+
+    con = catalog.get_connection(dataset_id)
+    try:
+        df = con.execute(f'SELECT * FROM "{table_name}"').df()
+    finally:
+        con.close()
+
+    series = df[column_name]
+    is_dt = pd.api.types.is_datetime64_any_dtype(series)
+    is_num = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+    non_null = int(series.notna().sum())
+    notes = []
+    converted = None  # "date" | "metric" | "text" when storage type changed
+
+    if new_role == "date":
+        if not is_dt:
+            if non_null == 0:
+                raise ColumnOverrideError(f"Column '{column_name}' has no values to parse as dates.")
+            src = series
+            if is_num:
+                # e.g. 20240115 stored as a float: parse as digits, not epoch ns
+                if not (src.dropna() % 1 == 0).all():
+                    raise ColumnOverrideError(
+                        f"Column '{column_name}' holds non-integer numbers, which can't be read as dates."
+                    )
+                src = src.dropna().astype("int64").astype(str).reindex(series.index)
+            parsed = pd.to_datetime(src, errors="coerce")
+            rate = int(parsed.notna().sum()) / non_null
+            if not rate > _MIN_PARSE_SUCCESS:
+                raise ColumnOverrideError(
+                    f"Can't treat '{column_name}' as a date: only {rate * 100:.0f}% of its values "
+                    f"parse as dates (need more than {_MIN_PARSE_SUCCESS * 100:.0f}%). Nothing was changed."
+                )
+            lost = non_null - int(parsed.notna().sum())
+            if lost:
+                notes.append(f"{lost} value(s) couldn't be parsed and were set to empty.")
+            df[column_name] = parsed
+            converted = "date"
+
+    elif new_role == "metric":
+        if is_dt:
+            raise ColumnOverrideError(
+                f"'{column_name}' is a date column; it can't be treated as a numeric metric."
+            )
+        if not is_num:
+            if non_null == 0:
+                raise ColumnOverrideError(f"Column '{column_name}' has no values to read as numbers.")
+            cleaned = series.apply(_clean_numeric_value)
+            rate = int(cleaned.notna().sum()) / non_null
+            if rate < _MIN_PARSE_SUCCESS:
+                raise ColumnOverrideError(
+                    f"Can't treat '{column_name}' as a metric: only {rate * 100:.0f}% of its values "
+                    f"convert to numbers (need at least {_MIN_PARSE_SUCCESS * 100:.0f}%). Nothing was changed."
+                )
+            lost = non_null - int(cleaned.notna().sum())
+            if lost:
+                notes.append(f"{lost} value(s) weren't numeric and were set to empty.")
+            df[column_name] = pd.to_numeric(cleaned, errors="coerce")
+            converted = "metric"
+
+    else:  # category / text / id
+        if is_dt:
+            # keep storage consistent with the label: a non-date role on a
+            # TIMESTAMP column would break category filters downstream
+            df[column_name] = series.dt.strftime("%Y-%m-%d %H:%M:%S").where(series.notna(), None)
+            converted = "text"
+
+    if converted:
+        con = catalog.get_connection(dataset_id)
+        try:
+            con.register("df_temp", df)
+            con.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM df_temp')
+        finally:
+            con.close()
+
+    # --- update the saved catalog record ---
+    new_meta = _profile_column(column_name, df[column_name], new_role)
+    info["columns"] = [new_meta if c["name"] == column_name else c for c in info["columns"]]
+
+    parsed_dates = [c for c in info.get("date_columns_parsed", []) if c != column_name]
+    if new_role == "date":
+        parsed_dates.append(column_name)
+    info["date_columns_parsed"] = parsed_dates
+
+    numeric_cleaned = [c for c in info.get("numeric_columns_cleaned", []) if c != column_name]
+    if new_role == "metric" and converted == "metric":
+        numeric_cleaned.append(column_name)
+    info["numeric_columns_cleaned"] = numeric_cleaned
+
+    dq = info.get("data_quality")
+    if dq:
+        n_rows = len(df)
+        missing = int(df.isna().sum().sum())
+        cells = n_rows * len(df.columns)
+        missing_pct = (missing / cells) if cells else 0.0
+        dup_pct = (dq.get("duplicate_row_count", 0) / n_rows) if n_rows else 0.0
+        if new_role == "date":
+            dq["invalid_date_columns"] = [c for c in dq.get("invalid_date_columns", []) if c != column_name]
+            dq["warnings"] = [
+                w for w in dq.get("warnings", [])
+                if not w.startswith(f"Column '{column_name}' looks like a date")
+            ]
+        dq["missing_value_count"] = missing
+        dq["missing_cell_pct"] = round(missing_pct * 100, 2)
+        dq["high_null_columns"] = [c for c in df.columns if df[c].isna().mean() > 0.5]
+        dq["numeric_columns_cleaned"] = numeric_cleaned
+        dq["quality_score"] = _compute_quality_score(
+            missing_pct, dup_pct, len(dq.get("invalid_date_columns", []))
+        )
+        if notes:
+            dq["warnings"] = dq.get("warnings", []) + [f"Override on '{column_name}': {n}" for n in notes]
+
+    catalog.register_table(dataset_id, table_name, info)
+    return {"table": info, "column": new_meta, "notes": notes}

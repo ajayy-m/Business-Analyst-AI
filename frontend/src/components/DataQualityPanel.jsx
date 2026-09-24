@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { ShieldCheck, ChevronDown, ChevronUp } from 'lucide-react';
+import { overrideColumnRole } from '../api';
+
+const ROLES = ['date', 'metric', 'category', 'id', 'text'];
 
 /**
  * Surfaces what ingestion already silently computes for every upload --
@@ -15,9 +18,27 @@ import { ShieldCheck, ChevronDown, ChevronUp } from 'lucide-react';
  * collapsed by default: this is a diagnostic detail, not something that
  * should compete with the KPI cards for attention on a clean dataset.
  */
-export default function DataQualityPanel({ dq }) {
+export default function DataQualityPanel({ dq, datasetId, tableName, columns, onCatalogChange }) {
   const [open, setOpen] = useState(false);
+  const [busyCol, setBusyCol] = useState(null);
+  const [roleMsg, setRoleMsg] = useState(null); // { col, ok, text }
   if (!dq) return null;
+
+  // Corrections are refused by the backend (with the measured parse rate)
+  // when the data doesn't support them -- the select just snaps back.
+  async function changeRole(col, newRole) {
+    setBusyCol(col);
+    setRoleMsg(null);
+    try {
+      const res = await overrideColumnRole(datasetId, tableName, col, newRole);
+      setRoleMsg({ col, ok: true, text: res.notes?.length ? res.notes.join(' ') : `'${col}' is now treated as ${newRole}.` });
+      onCatalogChange?.();
+    } catch (err) {
+      setRoleMsg({ col, ok: false, text: err.message });
+    } finally {
+      setBusyCol(null);
+    }
+  }
 
   const score = dq.quality_score;
   const tone = score >= 90 ? 'text-gain' : score >= 70 ? 'text-flag' : 'text-decline';
@@ -64,6 +85,36 @@ export default function DataQualityPanel({ dq }) {
                 </li>
               ))}
             </ul>
+          )}
+          {columns && columns.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-line">
+              <p className="text-xs uppercase tracking-wide text-muted mb-1.5">Column roles</p>
+              <p className="text-[11px] text-muted mb-2">
+                Auto-detected. If one is wrong, correct it -- date and metric changes re-parse the
+                column and are refused if the values don't actually convert.
+              </p>
+              <div className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 items-center">
+                {columns.map((c) => (
+                  <div key={c.name} className="contents">
+                    <span className="figure text-xs text-ink truncate" title={c.name}>
+                      {c.name}
+                      <span className="text-muted"> · {c.sample_values?.[0] ?? ''}</span>
+                    </span>
+                    <select
+                      value={c.inferred_role}
+                      disabled={busyCol === c.name}
+                      onChange={(e) => changeRole(c.name, e.target.value)}
+                      className="text-xs border border-line rounded-sm bg-white px-1.5 py-0.5"
+                    >
+                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              {roleMsg && (
+                <p className={`text-xs mt-2 ${roleMsg.ok ? 'text-gain' : 'text-decline'}`}>{roleMsg.text}</p>
+              )}
+            </div>
           )}
           <p className="text-[11px] text-muted mt-2.5">
             Score is 100 minus capped penalties for missing values, duplicate

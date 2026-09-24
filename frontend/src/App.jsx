@@ -96,7 +96,7 @@ export default function App() {
               Drop a CSV or Excel file in the sidebar to get started.
             </p>
           )}
-          {catalog && tab === 'dashboard' && <Dashboard datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
+          {catalog && tab === 'dashboard' && <Dashboard datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} onCatalogChange={refreshCatalog} />}
           {catalog && tab === 'ask' && <AskPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
           {catalog && tab === 'forecast' && <ForecastPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
           {catalog && tab === 'churn' && <ChurnPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}

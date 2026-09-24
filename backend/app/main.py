@@ -111,6 +111,25 @@ def get_catalog(dataset_id: str):
     return ds
 
 
+@app.post("/datasets/{dataset_id}/tables/{table_name}/columns/role")
+def override_column_role(
+    dataset_id: str,
+    table_name: str,
+    column_name: str = Form(...),
+    new_role: str = Form(...),
+):
+    """Manually correct a column's detected role. Date/metric overrides
+    really re-parse and convert the stored column (same rules and 80%
+    threshold as ingestion) and are refused, with the measured success
+    rate, if the data doesn't support them."""
+    if not catalog.get_dataset_catalog(dataset_id):
+        raise HTTPException(404, "Dataset not found.")
+    try:
+        return ingestion.override_column_role(dataset_id, table_name, column_name, new_role)
+    except ingestion.ColumnOverrideError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/datasets/{dataset_id}/catalog/text")
 def get_catalog_text(dataset_id: str):
     """Returns the LLM-ready schema summary -- useful to sanity check what

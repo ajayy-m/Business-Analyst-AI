@@ -104,3 +104,11 @@ export async function getChurn(datasetId, idColumn, metricColumn, dateColumn, to
   });
   return handle(res);
 }
+export async function overrideColumnRole(datasetId, tableName, columnName, newRole) {
+  const form = new URLSearchParams({ column_name: columnName, new_role: newRole });
+  const res = await fetch(
+    `${BASE}/datasets/${datasetId}/tables/${encodeURIComponent(tableName)}/columns/role`,
+    { method: 'POST', body: form },
+  );
+  return handle(res);
+}
