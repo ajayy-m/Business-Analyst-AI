@@ -414,6 +414,13 @@ def _compute_quality_score(missing_cell_pct: float, duplicate_row_pct: float, in
 
 def _profile_column(name: str, series: pd.Series, role: str) -> dict:
     sample_vals = series.dropna().unique()[:5].tolist()
+    # Dates display as plain YYYY-MM-DD; a midnight 00:00:00 timestamp on
+    # every sample would be pure noise for a column that has no time
+    # component (Timestamp.date() is a no-op on ones that do have one).
+    if pd.api.types.is_datetime64_any_dtype(series):
+        sample_strs = [str(v.date()) if hasattr(v, "date") else str(v) for v in sample_vals]
+    else:
+        sample_strs = [str(v) for v in sample_vals]
     return {
         "name": name,
         "dtype": str(series.dtype),
@@ -421,7 +428,7 @@ def _profile_column(name: str, series: pd.Series, role: str) -> dict:
         "null_count": int(series.isna().sum()),
         "null_pct": round(float(series.isna().mean()) * 100, 2),
         "distinct_count": int(series.nunique()),
-        "sample_values": [str(v) for v in sample_vals],
+        "sample_values": sample_strs,
     }
 
 

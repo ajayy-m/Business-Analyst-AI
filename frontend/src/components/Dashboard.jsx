@@ -187,7 +187,11 @@ export default function Dashboard({ datasetId, catalog, selectedTable, onSelectT
       )}
 
       {dashboard?.kpis?.length === 0 && !dashboard?.note && !loading && (
-        <p className="text-sm text-muted mb-6">No data remains for the current filter selection.</p>
+        <p className="text-sm text-muted mb-6">
+          {dashboard?.filters?.date || Object.keys(activeFilters).length > 0 || dateFrom || dateTo
+            ? 'No data remains for the current filter selection.'
+            : 'No date column detected, so trend and KPI cards can\'t be built. Set one under Data quality → Column roles.'}
+        </p>
       )}
 
       {dashboard?.charts?.length > 0 && (
