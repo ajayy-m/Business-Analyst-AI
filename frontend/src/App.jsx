@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Search, TrendingUp, UserX } from 'lucide-react';
+import { LayoutDashboard, Search, TrendingUp, UserX, AlertTriangle } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import AskPanel from './components/AskPanel';
 import ForecastPanel from './components/ForecastPanel';
 import ChurnPanel from './components/ChurnPanel';
+import AnomalyPanel from './components/AnomalyPanel';
 import { getCatalog } from './api';
 import { getWorkspaceId } from './utils';
 
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'ask', label: 'Ask', icon: Search },
   { id: 'forecast', label: 'Forecast', icon: TrendingUp },
   { id: 'churn', label: 'At-risk', icon: UserX },
+  { id: 'anomalies', label: 'Anomalies', icon: AlertTriangle },
 ];
 
 export default function App() {
@@ -100,6 +102,7 @@ export default function App() {
           {catalog && tab === 'ask' && <AskPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
           {catalog && tab === 'forecast' && <ForecastPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
           {catalog && tab === 'churn' && <ChurnPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
+          {catalog && tab === 'anomalies' && <AnomalyPanel datasetId={datasetId} catalog={catalog} selectedTable={selectedTable} onSelectTable={setSelectedTable} />}
         </div>
       </main>
     </div>

@@ -59,8 +59,12 @@ export async function diagnoseDirect(datasetId, metricColumn, dateColumn, filter
   return handle(res);
 }
 
-export async function getAnomalies(datasetId) {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/anomalies`);
+export async function getAnomalies(datasetId, tableName = null, zThreshold = null) {
+  const params = new URLSearchParams();
+  if (tableName) params.set('table_name', tableName);
+  if (zThreshold != null) params.set('z_threshold', zThreshold);
+  const qs = params.toString();
+  const res = await fetch(`${BASE}/datasets/${datasetId}/anomalies${qs ? `?${qs}` : ''}`);
   return handle(res);
 }
 

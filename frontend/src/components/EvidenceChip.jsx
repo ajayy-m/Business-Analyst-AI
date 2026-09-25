@@ -5,7 +5,7 @@ import { useState } from 'react';
  * LLM only narrates it -- made visible and interactive. Click a chip to
  * see exactly what produced the number next to it.
  */
-export default function EvidenceChip({ label, detail }) {
+export default function EvidenceChip({ label, detail, align = 'left' }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -17,7 +17,9 @@ export default function EvidenceChip({ label, detail }) {
         {label}
       </button>
       {open && (
-        <div className="figure absolute z-20 top-full mt-1 left-0 w-max max-w-xs rounded-sm border border-line bg-paper p-2 text-[11px] text-ink shadow-lg whitespace-pre-wrap">
+        <div
+          className={`figure absolute z-20 top-full mt-1 ${align === 'right' ? 'right-0' : 'left-0'} w-max max-w-xs rounded-sm border border-line bg-paper p-2 text-[11px] text-ink shadow-lg whitespace-pre-wrap`}
+        >
           {detail}
         </div>
       )}
